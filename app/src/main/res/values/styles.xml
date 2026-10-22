@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Metro" parent="android:Theme.Material.NoActionBar.Fullscreen">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:colorAccent">#1BA1E2</item>
+        <item name="android:windowShowWallpaper">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowAnimationStyle">@style/MetroWindowAnim</item>
+    </style>
+    <!-- Coming back to Start: the app shrinks away, Start fades up underneath. -->
+    <style name="MetroWindowAnim" parent="@android:style/Animation.Activity">
+        <item name="android:activityOpenEnterAnimation">@anim/app_in</item>
+        <item name="android:activityOpenExitAnimation">@anim/hold</item>
+        <item name="android:activityCloseEnterAnimation">@anim/start_in</item>
+        <item name="android:activityCloseExitAnimation">@anim/app_out</item>
+        <item name="android:taskOpenEnterAnimation">@anim/app_in</item>
+        <item name="android:taskOpenExitAnimation">@anim/hold</item>
+        <item name="android:taskToFrontEnterAnimation">@anim/start_in</item>
+        <item name="android:taskToFrontExitAnimation">@anim/app_out</item>
+        <item name="android:taskToBackEnterAnimation">@anim/start_in</item>
+        <item name="android:taskToBackExitAnimation">@anim/app_out</item>
+        <item name="android:taskCloseEnterAnimation">@anim/start_in</item>
+        <item name="android:taskCloseExitAnimation">@anim/app_out</item>
+        <item name="android:wallpaperOpenEnterAnimation">@anim/app_in</item>
+        <item name="android:wallpaperCloseExitAnimation">@anim/app_out</item>
+    </style>
+</resources>

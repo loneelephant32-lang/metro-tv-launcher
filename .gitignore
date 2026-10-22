@@ -1,0 +1,20 @@
+# Build output
+build/
+app/build/
+.gradle/
+*.apk
+*.aab
+
+# Machine-specific
+local.properties
+.idea/
+*.iml
+.DS_Store
+
+# Release signing: never commit
+keystore.properties
+*.jks
+*.keystore
+
+# Raw test screenshots (curated ones live in docs/)
+shots/
