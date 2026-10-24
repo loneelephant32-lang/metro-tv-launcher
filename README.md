@@ -11,7 +11,7 @@ A tiny, fast home screen for Android TV that brings back the Windows 8 Start scr
 - **Windows 8 animations.** Tiles swing away in a turnstile and the app's colour zooms up when you open something; tiles fly back in when you return.
 - **Themes:** Black, White, four dark gradients (Midnight, Aurora, Ember, Graphite), or your own image. Pick one of the 20 Windows 8 accent colours to theme every tile with white logos that keep their cut-out details.
 - **Start menu.** Select "Start" for every app in alphabetical order, and pin or unpin any of them.
-- **Status bar** with Personalize, Recent apps, Settings and Wi-Fi shortcuts, plus the time.
+- **Status bar** with Voice search (Google Assistant), Personalize, Recent apps, Settings and Wi-Fi shortcuts, plus the time. The remote's search button opens the assistant too.
 - **Close apps:** close background apps one at a time from Recent apps, or all at once.
 - **No internet access.** The app doesn't request the internet permission, so nothing you do leaves your TV.
 
@@ -96,7 +96,8 @@ A custom background image asks for photo/storage permission the first time you p
 |---|---|
 | Arrows | Move between tiles |
 | OK | Open the app |
-| **Menu**, or hold OK | Tile menu: size, colour, move, pause/resume media, close, unpin |
+| **Menu**, or hold OK | Tile menu: move, size, colour, pause/resume media, close, unpin |
+| Arrows, while moving a tile | Carry it left, right, up or down; OK when done |
 | Up, to the top bar | Reach **Start** (all apps) and the status icons |
 | Menu on an app in the Start list | Pin to Start or unpin |
 | Back | Close the open panel |

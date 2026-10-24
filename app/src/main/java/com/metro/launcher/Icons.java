@@ -18,7 +18,7 @@ import android.os.Build;
  */
 final class Icons {
     /** Bump when the extraction changes so cached results are recomputed. */
-    static final int VERSION = 10;
+    static final int VERSION = 12;
     static final int FALLBACK = 0xFF647687;
 
     Bitmap glyph;
@@ -153,23 +153,51 @@ final class Icons {
                 (int) (Color.blue(a) + (Color.blue(b) - Color.blue(a)) * t));
     }
 
-    /** Fade out every pixel close to the (interpolated) plate colour, leaving only the logo. */
+    /**
+     * Lift the logo off its (interpolated) plate. An anti-aliased edge pixel is a blend of logo and
+     * plate, so its opacity is how far it sits from the plate relative to the logo's full contrast,
+     * and its colour is un-blended back to the logo's. A fixed narrow cut-off used to turn those blends
+     * into hard steps, which showed as jagged edges once logos were painted white on accent tiles.
+     */
     static Bitmap removePlate(Bitmap bm, int[][] ring) {
-        int w = bm.getWidth(), h = bm.getHeight();
+        int w = bm.getWidth(), h = bm.getHeight(), n = w * h;
         int[] top = ring[0], bottom = ring[1], left = ring[2], right = ring[3];
-        int[] p = new int[w * h];
+        int[] p = new int[n], plates = new int[n], dists = new int[n];
         bm.getPixels(p, 0, w, 0, 0, w, h);
+        int[] hist = new int[256];
+        int strong = 0;
         for (int y = 0; y < h; y++) {
             for (int x = 0; x < w; x++) {
-                int c = p[y * w + x];
+                int i = y * w + x;
                 int across = lerp(left[y], right[y], x / (float) (w - 1)), down = lerp(top[x], bottom[x], y / (float) (h - 1));
-                int plate = lerp(across, down, 0.5f);
-                float f = Math.max(0, Math.min(1, (dist(c, plate) - 26) / 46f));
-                p[y * w + x] = ((int) (Color.alpha(c) * f) << 24) | (c & 0xFFFFFF);
+                plates[i] = lerp(across, down, 0.5f);
+                dists[i] = Math.min(255, dist(p[i], plates[i]));
+                if (dists[i] > 26) { hist[dists[i]]++; strong++; }
             }
+        }
+        // The logo's full contrast against the plate: the distance most of its solid pixels reach.
+        int full = 255;
+        for (int v = 0, seen = 0; v < 256; v++) {
+            seen += hist[v];
+            if (seen >= strong * 0.6f) { full = v; break; }
+        }
+        // Fully solid well before full contrast, so shading inside a logo doesn't turn see-through.
+        float lo = 14, hi = Math.max(lo + 40, full * 0.65f);
+        for (int i = 0; i < n; i++) {
+            int c = p[i], pl = plates[i];
+            float f = Math.max(0, Math.min(1, (dists[i] - lo) / (hi - lo)));
+            if (f <= 0) { p[i] = 0; continue; }
+            int r = unblend(Color.red(c), Color.red(pl), f), g = unblend(Color.green(c), Color.green(pl), f),
+                    b = unblend(Color.blue(c), Color.blue(pl), f);
+            p[i] = ((int) (Color.alpha(c) * f) << 24) | (r << 16) | (g << 8) | b;
         }
         bm.setPixels(p, 0, w, 0, 0, w, h);
         return bm;
+    }
+
+    /** The logo colour that, mixed with the plate at opacity f, gives what was drawn. */
+    static int unblend(int seen, int plate, float f) {
+        return Math.max(0, Math.min(255, Math.round(plate + (seen - plate) / f)));
     }
 
     /** Share of the logo's visible pixels whose distance from the tile colour is in [min, max). */

@@ -3,7 +3,6 @@ package com.metro.launcher;
 import android.animation.ValueAnimator;
 import android.content.Context;
 import android.graphics.Bitmap;
-import android.graphics.BlurMaskFilter;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.LinearGradient;
@@ -62,11 +61,11 @@ public class TileView extends View {
 
     Face[] faces = {Face.icon()};
     int face, prevFace;
-    float slide = 1, glow;
-    private ValueAnimator flipAnim, glowAnim;
+    float slide = 1, ring;
+    private ValueAnimator flipAnim, ringAnim;
 
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG), contour = new Paint(Paint.ANTI_ALIAS_FLAG),
-            halo = new Paint(Paint.FILTER_BITMAP_FLAG), line = new Paint(Paint.ANTI_ALIAS_FLAG),
+            line = new Paint(Paint.ANTI_ALIAS_FLAG),
             bmp = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG),
             white = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG), mark = new Paint(Paint.FILTER_BITMAP_FLAG);
     private final TextPaint capP = new TextPaint(Paint.ANTI_ALIAS_FLAG), brandP = new TextPaint(Paint.ANTI_ALIAS_FLAG),
@@ -77,13 +76,7 @@ public class TileView extends View {
     private final IdentityHashMap<String, CharSequence> fitted = new IdentityHashMap<>(), fittedUpper = new IdentityHashMap<>();
     private final RectF dst = new RectF();
     private final float d;
-    /**
-     * The glow is one tiny pre-blurred alpha sprite, shared by every tile and stretched around the
-     * focused one. Blurring live on the GPU looked the same but cached ~20 MB of textures on this TV.
-     */
-    private static Bitmap glowSprite;
-    private static int glowR;
-    private final Rect gs = new Rect(), artSrc = new Rect();
+    private final Rect artSrc = new Rect();
     /** Darkens the top and bottom of artwork so the brand mark and text stay readable on any picture. */
     private final Paint scrim = new Paint();
 
@@ -95,15 +88,6 @@ public class TileView extends View {
         setLongClickable(true);
         contour.setStyle(Paint.Style.STROKE);
         contour.setStrokeWidth(2 * d);
-        if (glowSprite == null) {
-            glowR = Math.round(20 * d);
-            int size = glowR * 4;
-            // An alpha-only bitmap draws in whatever colour the paint has, so one sprite serves every tile.
-            glowSprite = Bitmap.createBitmap(size, size, Bitmap.Config.ALPHA_8);
-            Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-            p.setMaskFilter(new BlurMaskFilter(glowR * 0.55f, BlurMaskFilter.Blur.OUTER));
-            new Canvas(glowSprite).drawRect(glowR, glowR, size - glowR, size - glowR, p);
-        }
         line.setColor(0xFFFFFFFF);
         white.setColorFilter(new PorterDuffColorFilter(0xFFFFFFFF, PorterDuff.Mode.SRC_IN));
         mark.setColorFilter(new PorterDuffColorFilter(0xFFFFFFFF, PorterDuff.Mode.SRC_IN));
@@ -197,16 +181,20 @@ public class TileView extends View {
         setPivotY(getHeight() / 2f);
     }
 
+    /**
+     * Moves the pivot without the tile visibly moving. On a scaled tile (the focused one is 4% bigger)
+     * a bare pivot change shifts it sideways, which showed as a jump when the launch turnstile began.
+     */
+    void pivotInPlace(float px, float py) {
+        setTranslationX(getTranslationX() + (getPivotX() - px) * (1 - getScaleX()));
+        setTranslationY(getTranslationY() + (getPivotY() - py) * (1 - getScaleY()));
+        setPivotX(px);
+        setPivotY(py);
+    }
+
     @Override
     protected void onDraw(Canvas c) {
         int w = getWidth(), h = getHeight();
-        if (glow > 0) {
-            // Contour glow: a soft halo in the tile's own colour, brightened, spilling past its edges.
-            halo.setColor(lighten(color, 0.45f));
-            halo.setAlpha((int) (255 * glow));
-            drawGlow(c, w, h);
-            drawGlow(c, w, h);
-        }
         c.save();
         c.clipRect(0, 0, w, h);
         if (slide < 1 && prevFace != face) {
@@ -225,31 +213,12 @@ public class TileView extends View {
             drawFace(c, faces[face], w, h);
         }
         c.restore();
-        if (glow > 0) {
+        if (ring > 0) {
             float o = contour.getStrokeWidth() / 2;
             contour.setColor(ringColor);
-            contour.setAlpha((int) (255 * glow));
+            contour.setAlpha((int) (255 * ring));
             c.drawRect(o, o, w - o, h - o, contour);
         }
-    }
-
-    /** Nine-slice the glow sprite around the tile: four corners plus four stretched edges. */
-    private void drawGlow(Canvas c, int w, int h) {
-        int r = glowR, size = glowSprite.getWidth(), m = size / 2;
-        slice(c, 0, 0, r, r, -r, -r, 0, 0);
-        slice(c, size - r, 0, size, r, w, -r, w + r, 0);
-        slice(c, 0, size - r, r, size, -r, h, 0, h + r);
-        slice(c, size - r, size - r, size, size, w, h, w + r, h + r);
-        slice(c, m, 0, m + 1, r, 0, -r, w, 0);
-        slice(c, m, size - r, m + 1, size, 0, h, w, h + r);
-        slice(c, 0, m, r, m + 1, -r, 0, 0, h);
-        slice(c, size - r, m, size, m + 1, w, 0, w + r, h);
-    }
-
-    private void slice(Canvas c, int sl, int st, int sr, int sb, float dl, float dt, float dr, float db) {
-        gs.set(sl, st, sr, sb);
-        dst.set(dl, dt, dr, db);
-        c.drawBitmap(glowSprite, gs, dst, halo);
     }
 
     private void drawBackground(Canvas c, int w, int h) {
@@ -387,11 +356,6 @@ public class TileView extends View {
         return Color.rgb((int) (Color.red(c) * (1 - by)), (int) (Color.green(c) * (1 - by)), (int) (Color.blue(c) * (1 - by)));
     }
 
-    static int lighten(int c, float by) {
-        return Color.rgb((int) (Color.red(c) + (255 - Color.red(c)) * by), (int) (Color.green(c) + (255 - Color.green(c)) * by),
-                (int) (Color.blue(c) + (255 - Color.blue(c)) * by));
-    }
-
     private void drawFitted(Canvas c, String s, float x, float y, float max, TextPaint p) {
         if (s == null) return;
         CharSequence t = fitted.get(s);
@@ -419,11 +383,11 @@ public class TileView extends View {
         animate().scaleX(f ? 1.04f : 1f).scaleY(f ? 1.04f : 1f).setDuration(150).start();
         // No elevation: its shadow is invisible on black and costs GPU time; the grid draws us last instead.
         if (getParent() instanceof View) ((View) getParent()).invalidate();
-        if (glowAnim != null) glowAnim.cancel();
-        glowAnim = ValueAnimator.ofFloat(glow, f ? 1 : 0);
-        glowAnim.setDuration(f ? 180 : 120);
-        glowAnim.addUpdateListener(a -> { glow = (float) a.getAnimatedValue(); invalidate(); });
-        glowAnim.start();
+        if (ringAnim != null) ringAnim.cancel();
+        ringAnim = ValueAnimator.ofFloat(ring, f ? 1 : 0);
+        ringAnim.setDuration(f ? 180 : 120);
+        ringAnim.addUpdateListener(a -> { ring = (float) a.getAnimatedValue(); invalidate(); });
+        ringAnim.start();
     }
 
     @Override

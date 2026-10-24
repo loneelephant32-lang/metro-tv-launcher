@@ -8,7 +8,7 @@ import android.graphics.RectF;
 /** Line-art system icons in the spirit of the Windows 8 glyphs, drawn with whatever colour the paint has. */
 final class Glyphs {
     static final int NONE = 0, CLOSE = 1, RECENT = 2, PERSONALIZE = 3, APPS = 4, MUSIC = 5, SETTINGS = 6,
-            WIFI = 7, ETHERNET = 8, NO_NETWORK = 9, MEMORY = 10;
+            WIFI = 7, ETHERNET = 8, NO_NETWORK = 9, MEMORY = 10, MIC = 11;
 
     private static final Path path = new Path();
     private static final RectF oval = new RectF();
@@ -96,6 +96,17 @@ final class Glyphs {
                     c.drawLine(x, cy + r * .1f, x, cy + r * .4f, p);
                     c.drawRect(x - q * .8f, cy + r * .4f, x + q * .8f, cy + r, p);
                 }
+                break;
+            }
+            case MIC: {
+                // A microphone: capsule head, cradle arc and stand.
+                float hw = r * .3f;
+                oval.set(cx - hw, cy - r, cx + hw, cy + r * .2f);
+                c.drawRoundRect(oval, hw, hw, p);
+                oval.set(cx - r * .58f, cy - r * .55f, cx + r * .58f, cy + r * .5f);
+                c.drawArc(oval, 0, 180, false, p);
+                c.drawLine(cx, cy + r * .5f, cx, cy + r * .9f, p);
+                c.drawLine(cx - r * .3f, cy + r * .9f, cx + r * .3f, cy + r * .9f, p);
                 break;
             }
             case MEMORY: {

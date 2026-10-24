@@ -52,8 +52,11 @@ final class Media implements MediaSessionManager.OnActiveSessionsChangedListener
     }
 
     static final long KEEP_MS = 7 * 24 * 3600_000L;
-    /** Art is kept small: a tile shows it at most ~450 px across, and RGB_565 halves the memory again. */
-    static final int ART_PX = 320;
+    /**
+     * Art is kept just big enough for the largest tile (about 340 dp) on this screen, so it stays sharp
+     * at 1080p and 4K without wasting memory at 720p; RGB_565 halves the memory again.
+     */
+    final int artPx;
 
     private static Media inst;
 
@@ -75,6 +78,7 @@ final class Media implements MediaSessionManager.OnActiveSessionsChangedListener
     private Media(Context c) {
         ctx = c;
         prefs = c.getSharedPreferences("media", Context.MODE_PRIVATE);
+        artPx = Math.min(1024, Math.round(340 * c.getResources().getDisplayMetrics().density));
         long now = System.currentTimeMillis();
         // Development builds kept covers here without knowing which title they went with.
         io.execute(() -> {
@@ -190,7 +194,7 @@ final class Media implements MediaSessionManager.OnActiveSessionsChangedListener
         }
         if (b == null && uri == null) return;
         // Apps often send a small icon first and the full cover a moment later: take the bigger one.
-        int size = b != null ? Math.min(b.getWidth(), b.getHeight()) : ART_PX;
+        int size = b != null ? Math.min(b.getWidth(), b.getHeight()) : artPx;
         if (it.title.equals(it.artFor) && size <= it.artPx) return;
         final String title = it.title, pkg = it.pkg, src = uri;
         it.artFor = title;
@@ -217,8 +221,8 @@ final class Media implements MediaSessionManager.OnActiveSessionsChangedListener
         });
     }
 
-    static Bitmap shrink(Bitmap b) {
-        float s = Math.min(1f, ART_PX / (float) Math.min(b.getWidth(), b.getHeight()));
+    Bitmap shrink(Bitmap b) {
+        float s = Math.min(1f, artPx / (float) Math.min(b.getWidth(), b.getHeight()));
         Bitmap scaled = Bitmap.createScaledBitmap(b, Math.max(1, Math.round(b.getWidth() * s)), Math.max(1, Math.round(b.getHeight() * s)), true);
         Bitmap out = scaled.copy(Bitmap.Config.RGB_565, false);
         if (scaled != b) scaled.recycle();

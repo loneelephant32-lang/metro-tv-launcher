@@ -4,6 +4,7 @@ import android.Manifest;
 import android.app.Activity;
 import android.app.ActivityManager;
 import android.app.ActivityOptions;
+import android.animation.ValueAnimator;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
@@ -97,7 +98,7 @@ public class StartActivity extends Activity implements Media.Listener {
 
     static class App {
         String pkg, label, activity, cat;
-        Bitmap glyph, mono;
+        Bitmap glyph, mono, thumb, monoThumb;
         int color;
         boolean white, picture;
 
@@ -114,22 +115,90 @@ public class StartActivity extends Activity implements Media.Listener {
      * tiles that are already visible only repaints those two tiles, so avoiding needless scrolls is
      * what keeps navigation smooth.
      */
-    static class CenteringScroller extends HorizontalScrollView {
+    /**
+     * The Start grid's scroller. The stock one waited until the focused tile reached the edge and then
+     * lurched half a screen in three frames, and snapped instantly when keys came faster than 250 ms.
+     * Instead the grid keeps the focused tile a comfortable distance from the edges, moving only as far
+     * as needed (about a column per press), and glides there on a critically damped spring: it eases in
+     * from rest, never overshoots, and a new press bends the motion instead of restarting it.
+     */
+    static class CenteringScroller extends HorizontalScrollView implements android.view.Choreographer.FrameCallback {
         final int margin;
+        /** Spring rate: settles in roughly a third of a second. */
+        static final float OMEGA = 15f;
+        float pos, vel, target;
+        long lastFrame;
+        boolean gliding;
 
         CenteringScroller(Context c) {
             super(c);
-            margin = Math.round(40 * c.getResources().getDisplayMetrics().density);
+            margin = Math.round(150 * c.getResources().getDisplayMetrics().density);
         }
+
+        int maxScroll() { return getChildCount() == 0 ? 0 : Math.max(0, getChildAt(0).getWidth() - getWidth()); }
 
         @Override
         protected int computeScrollDeltaToGetChildRectOnScreen(Rect r) {
             if (getChildCount() == 0) return 0;
-            int left = getScrollX(), right = left + getWidth();
-            if (r.left >= left + margin && r.right <= right - margin) return 0;
-            int max = Math.max(0, getChildAt(0).getWidth() - getWidth());
-            int target = Math.max(0, Math.min(max, r.centerX() - getWidth() / 2));
-            return target - getScrollX();
+            // Measure against where the glide is heading, so quick presses add up instead of fighting.
+            float base = gliding ? target : getScrollX();
+            int m = Math.min(margin, Math.max(0, (getWidth() - r.width()) / 2));
+            float t = base;
+            if (r.left < base + m) t = r.left - m;
+            else if (r.right > base + getWidth() - m) t = r.right - getWidth() + m;
+            glideTo(t);
+            return 0;
+        }
+
+        void glideTo(float t) {
+            t = Math.max(0, Math.min(maxScroll(), t));
+            if (Math.abs(t - (gliding ? target : getScrollX())) < 0.5f) return;
+            target = t;
+            if (!gliding) {
+                pos = getScrollX();
+                vel = 0;
+                gliding = true;
+                lastFrame = 0;
+                android.view.Choreographer.getInstance().postFrameCallback(this);
+            }
+        }
+
+        void jumpTo(int x) {
+            stopGlide();
+            scrollTo(x, 0);
+        }
+
+        void stopGlide() {
+            if (gliding) android.view.Choreographer.getInstance().removeFrameCallback(this);
+            gliding = false;
+        }
+
+        @Override
+        public void doFrame(long now) {
+            if (!gliding) return;
+            float dt = lastFrame == 0 ? 1 / 60f : Math.min(0.05f, (now - lastFrame) / 1e9f);
+            lastFrame = now;
+            // Integrate in small steps so a long frame on a slow GPU doesn't throw the spring off.
+            for (float left = dt; left > 0; left -= 0.004f) {
+                float h = Math.min(0.004f, left);
+                vel += (OMEGA * OMEGA * (target - pos) - 2 * OMEGA * vel) * h;
+                pos += vel * h;
+            }
+            // Finish once it's within a pixel and nearly still: a critically damped spring otherwise
+            // creeps the last pixel for a quarter of a second.
+            if (Math.abs(target - pos) < 1.5f && Math.abs(vel) < 40) {
+                gliding = false;
+                scrollTo(Math.round(target), 0);
+                return;
+            }
+            scrollTo(Math.round(pos), 0);
+            android.view.Choreographer.getInstance().postFrameCallback(this);
+        }
+
+        @Override
+        protected void onDetachedFromWindow() {
+            stopGlide();
+            super.onDetachedFromWindow();
         }
     }
 
@@ -150,6 +219,7 @@ public class StartActivity extends Activity implements Media.Listener {
             setOnFocusChangeListener((v, f) -> {
                 invalidate();
                 statusHint.setText(f ? name : "");
+                if (f) placeHint(this);
             });
         }
 
@@ -181,7 +251,7 @@ public class StartActivity extends Activity implements Media.Listener {
     ImageView bgImage;
     TextView startButton, clock, date, statusHint;
     StatusButton wifiButton;
-    HorizontalScrollView scroller;
+    CenteringScroller scroller;
     TileGrid grid;
     FrameLayout splash;
     ImageView splashIcon;
@@ -271,6 +341,7 @@ public class StartActivity extends Activity implements Media.Listener {
     protected void onPause() {
         super.onPause();
         resumed = false;
+        if (moving != null) endMove();
         h.removeCallbacks(ticker);
         h.removeCallbacks(flipper);
     }
@@ -295,7 +366,7 @@ public class StartActivity extends Activity implements Media.Listener {
         }
         // Home pressed while already on Start: close whatever is open and jump back to the first tile.
         if (closeFlyout()) return;
-        scroller.smoothScrollTo(0, 0);
+        scroller.glideTo(0);
         if (!tiles.isEmpty()) tiles.get(0).requestFocus();
     }
 
@@ -304,6 +375,11 @@ public class StartActivity extends Activity implements Media.Listener {
 
     @Override
     public boolean onKeyDown(int code, KeyEvent e) {
+        // The remote's mic / search button: the stock launcher opens the assistant, so Metro must too.
+        if (code == KeyEvent.KEYCODE_SEARCH || code == KeyEvent.KEYCODE_VOICE_ASSIST || code == KeyEvent.KEYCODE_ASSIST) {
+            voiceSearch();
+            return true;
+        }
         if (code == KeyEvent.KEYCODE_MENU && flyoutOpen) {
             View f = getCurrentFocus();
             if (f != null && f.getTag() instanceof App) appMenu((App) f.getTag());
@@ -373,11 +449,12 @@ public class StartActivity extends Activity implements Media.Listener {
         right.setOrientation(LinearLayout.HORIZONTAL);
         right.setGravity(Gravity.CENTER_VERTICAL);
         right.setClipChildren(false);
+        StatusButton voice = new StatusButton(Glyphs.MIC, "Voice search", v -> voiceSearch());
         StatusButton personalize = new StatusButton(Glyphs.PERSONALIZE, "Personalize", v -> showSettings());
         StatusButton recent = new StatusButton(Glyphs.RECENT, "Recent apps", v -> showRecents());
         StatusButton settings = new StatusButton(Glyphs.SETTINGS, "Settings", v -> startSafe(new Intent(Settings.ACTION_SETTINGS)));
         wifiButton = new StatusButton(Glyphs.WIFI, "Network", v -> startSafe(new Intent(Settings.ACTION_WIFI_SETTINGS)));
-        for (View v : new View[]{personalize, recent, settings, wifiButton}) {
+        for (View v : new View[]{voice, personalize, recent, settings, wifiButton}) {
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(38), dp(38));
             lp.leftMargin = dp(6);
             right.addView(v, lp);
@@ -385,8 +462,8 @@ public class StartActivity extends Activity implements Media.Listener {
         LinearLayout time = new LinearLayout(this);
         time.setOrientation(LinearLayout.VERTICAL);
         time.setGravity(Gravity.END);
-        clock = text("", 22, Fonts.REG);
-        date = text("", 11.5f, Fonts.REG);
+        clock = text("", 28, Fonts.REG);
+        date = text("", 12, Fonts.REG);
         date.setPadding(0, dp(4), 0, 0);
         time.addView(clock);
         time.addView(date);
@@ -398,10 +475,7 @@ public class StartActivity extends Activity implements Media.Listener {
         header.addView(right, rlp);
         statusHint = text("", 11, Fonts.MED);
         statusHint.setLetterSpacing(0.06f);
-        FrameLayout.LayoutParams hlp = new FrameLayout.LayoutParams(-2, -2, Gravity.END | Gravity.TOP);
-        hlp.topMargin = dp(52);
-        hlp.rightMargin = dp(110);
-        header.addView(statusHint, hlp);
+        header.addView(statusHint, new FrameLayout.LayoutParams(-2, -2, Gravity.START | Gravity.TOP));
         content.addView(header, new LinearLayout.LayoutParams(-1, -2));
 
         scroller = new CenteringScroller(this);
@@ -500,6 +574,26 @@ public class StartActivity extends Activity implements Media.Listener {
         return a.glyph;
     }
 
+    /**
+     * A quarter-size copy for the small squares in lists: opening the app list then doesn't hold every
+     * full-size logo in memory. The white version is an alpha mask, like the full one.
+     */
+    Bitmap thumb(App a, boolean white) {
+        boolean useMono = white && !a.picture && (monoFile(a.pkg).exists() || mono(a) != null);
+        Bitmap t = useMono ? a.monoThumb : a.thumb;
+        if (t != null) return t;
+        BitmapFactory.Options o = new BitmapFactory.Options();
+        o.inSampleSize = 4;
+        Bitmap b = BitmapFactory.decodeFile((useMono ? monoFile(a.pkg) : iconFile(a.pkg)).getPath(), o);
+        if (b == null) return glyph(a);
+        if (useMono) {
+            Bitmap m = b.extractAlpha();
+            b.recycle();
+            return a.monoThumb = m;
+        }
+        return a.thumb = b;
+    }
+
     /** The white logo, held as an alpha mask (a quarter of the memory); null for picture icons. */
     Bitmap mono(App a) {
         if (a.picture) return null;
@@ -535,8 +629,9 @@ public class StartActivity extends Activity implements Media.Listener {
         scanning = true;
         final Map<String, App> old = new HashMap<>(apps);
         final PackageManager pm = getPackageManager();
-        // Logos are drawn up to ~46 dp on wide tiles and as watermarks; extract with headroom so they stay sharp.
-        final int px = dp(120);
+        // The largest use is the faint watermark on a large tile, about 200 dp across; cut logos at that
+        // size so nothing is ever drawn bigger than it was stored (smaller uses come from mipmaps).
+        final int px = dp(200);
         new Thread(() -> {
             Map<String, App> found = new LinkedHashMap<>();
             StringBuilder list = new StringBuilder();
@@ -550,7 +645,8 @@ public class StartActivity extends Activity implements Media.Listener {
                     a.cat = cat;
                     long updated = 0;
                     try { updated = pm.getPackageInfo(pkg, 0).lastUpdateTime; } catch (Exception ignored) { }
-                    String stamp = Icons.VERSION + ":" + updated;
+                    // The screen density is part of the stamp: logos are cut at a size made for this screen.
+                    String stamp = Icons.VERSION + "-" + getResources().getDisplayMetrics().densityDpi + ":" + updated;
                     String meta = prefs.getString("ic_" + pkg, "");
                     App prev = old.get(pkg);
                     // Loading a label loads that app's resources; reuse ours unless the app was updated.
@@ -578,6 +674,7 @@ public class StartActivity extends Activity implements Media.Listener {
                                 ic.glyph.compress(Bitmap.CompressFormat.PNG, 100, out);
                             } catch (Exception ignored) { }
                             if (!ic.picture) saveMono(pkg, ic.glyph);
+                            if (prev != null) { prev.thumb = null; prev.monoThumb = null; }
                             prefs.edit().putString("ic_" + pkg, stamp + ":" + a.color + ":" + (a.white ? 1 : 0) + ":" + (a.picture ? 1 : 0)).apply();
                         }
                     }
@@ -911,12 +1008,20 @@ public class StartActivity extends Activity implements Media.Listener {
     boolean animations() { return prefs.getBoolean("anim", true); }
 
     /** Pivot each tile on the left edge of the screen so the whole start screen swings like a turnstile. */
-    void pivotOnScreenEdge(View t) {
+    /** Turnstile hinge: the left edge of the screen, set without moving the tile. */
+    void pivotOnScreenEdge(TileView t) {
         int[] loc = new int[2];
-        t.getLocationOnScreen(loc);
-        t.setPivotX(-loc[0] + t.getWidth() * (t.getScaleX() - 1) / 2);
-        t.setPivotY(t.getHeight() / 2f);
-        t.setCameraDistance(9000 * d);
+        grid.getLocationOnScreen(loc);
+        t.pivotInPlace(-(loc[0] + t.getLeft()), t.getHeight() / 2f);
+        // Nearer camera = stronger perspective, so the swing reads as depth rather than a squash.
+        t.setCameraDistance(6000 * d);
+    }
+
+    /** Back to a centred pivot and no offset, the resting state every other animation assumes. */
+    static void settle(TileView t) {
+        t.centrePivot();
+        t.setTranslationX(0);
+        t.setTranslationY(0);
     }
 
     float screenFraction(View t) {
@@ -941,23 +1046,64 @@ public class StartActivity extends Activity implements Media.Listener {
                 float s = t.isFocused() ? 1.04f : 1f;
                 t.setScaleX(s);
                 t.setScaleY(s);
-                if (!onScreen(t)) { t.setRotationY(0); t.setAlpha(1); t.setTranslationX(0); t.centrePivot(); continue; }
+                settle(t);
+                if (!onScreen(t)) { t.setRotationY(0); t.setAlpha(1); continue; }
                 pivotOnScreenEdge(t);
-                t.setRotationY(-55);
-                t.setTranslationX(dp(90));
-                t.setAlpha(0);
-                t.animate().rotationY(0).translationX(0).alpha(1)
-                        .setStartDelay((long) (60 + 220 * screenFraction(t)))
-                        .setDuration(380).setInterpolator(new DecelerateInterpolator(2.2f))
-                        .withEndAction(t::centrePivot).start();
+                turnstile(t, true, (long) (40 + 280 * screenFraction(t)), 560);
             }
         });
+    }
+
+    /** Running turnstiles, so restoreStart can stop them all at once. */
+    final List<ValueAnimator> turns = new ArrayList<>();
+
+    /**
+     * One tile's Windows 8 turnstile, hinged on the left edge of the screen. Going out, the tile
+     * speeds up as it swings away and only fades in the second half of the swing, so the motion reads
+     * clearly. Coming in, it swings from the right and slows into place, fading in early.
+     */
+    void turnstile(TileView t, boolean in, long delay, long duration) {
+        final float rest = t.getTranslationX(), shift = dp(in ? 70 : 36);
+        final DecelerateInterpolator ease = new DecelerateInterpolator(2f);
+        ValueAnimator va = ValueAnimator.ofFloat(0, 1);
+        va.setStartDelay(delay);
+        va.setDuration(duration);
+        va.addUpdateListener(an -> {
+            float p = (float) an.getAnimatedValue();
+            if (in) {
+                float q = 1 - ease.getInterpolation(p);
+                t.setRotationY(-72 * q);
+                t.setTranslationX(rest + shift * q);
+                t.setAlpha(Math.min(1, p / 0.3f));
+            } else {
+                // Picks up speed, but already moving from the first frame (a pure ease-in reads as a stall).
+                float q = p * (0.3f + 0.7f * p);
+                t.setRotationY(88 * q);
+                t.setTranslationX(rest - shift * q);
+                t.setAlpha(p < 0.45f ? 1 : Math.max(0, 1 - (p - 0.45f) / 0.55f));
+            }
+        });
+        va.addListener(new android.animation.AnimatorListenerAdapter() {
+            @Override public void onAnimationEnd(android.animation.Animator an) {
+                turns.remove(an);
+                if (in) { t.setRotationY(0); t.setAlpha(1); settle(t); }
+            }
+        });
+        if (in) {
+            t.setRotationY(-72);
+            t.setTranslationX(rest + shift);
+            t.setAlpha(0);
+        }
+        turns.add(va);
+        va.start();
     }
 
     /** Undo every launch-animation state at once, so nothing on Start can be left invisible or rotated. */
     void restoreStart() {
         h.removeCallbacks(launchWatchdog);
         launching = false;
+        for (ValueAnimator va : new ArrayList<>(turns)) va.cancel();
+        turns.clear();
         splash.animate().cancel();
         splash.setVisibility(View.GONE);
         View header = content.getChildAt(0);
@@ -971,8 +1117,7 @@ public class StartActivity extends Activity implements Media.Listener {
             t.animate().cancel();
             t.setRotationY(0);
             t.setAlpha(1);
-            t.setTranslationX(0);
-            t.centrePivot();
+            settle(t);
             float sc = t.isFocused() ? 1.04f : 1f;
             t.setScaleX(sc);
             t.setScaleY(sc);
@@ -993,13 +1138,15 @@ public class StartActivity extends Activity implements Media.Listener {
         header.animate().cancel();
         if (in) { header.setAlpha(0); header.setTranslationX(dp(40)); }
         header.animate().alpha(in ? 1 : 0).translationX(in ? 0 : -dp(30)).setStartDelay(in ? 40 : 0)
-                .setDuration(in ? 380 : 180).setInterpolator(new DecelerateInterpolator()).start();
+                .setDuration(in ? 460 : 300).setInterpolator(new DecelerateInterpolator()).start();
     }
 
     /**
      * Windows 8 app launch: Start flips away (tiles turnstile out, or the Apps list slides off), then
      * the app's coloured splash zooms up from where it was selected.
      */
+    static final long TURN_OUT_MS = 480, TURN_SELECTED_DELAY = 280;
+
     void launch(View from, App a) {
         if (launching) return;
         pushRecent(a.pkg);
@@ -1009,15 +1156,22 @@ public class StartActivity extends Activity implements Media.Listener {
             return;
         }
         launching = true;
-        {
-            fadeHeader(false);
-            for (TileView t : tiles) {
-                if (!onScreen(t)) continue;
-                pivotOnScreenEdge(t);
-                long delay = t == from ? 70 : (long) (60 * screenFraction(t));
-                t.animate().rotationY(80).alpha(0).setStartDelay(delay).setDuration(160)
-                        .setInterpolator(new AccelerateInterpolator(1.6f)).start();
-            }
+        if (moving != null) endMove();
+        // Windows 8 order: the other tiles turnstile away, left to right, and the chosen tile follows
+        // last; its colour then grows to fill the screen. The splash only starts once the tiles have
+        // visibly gone, otherwise it covers the turnstile before anyone sees it.
+        fadeHeader(false);
+        for (TileView t : tiles) {
+            if (!onScreen(t)) continue;
+            t.animate().cancel();
+            settle(t);
+            float sc = t == from ? 1.04f : 1f;
+            t.setScaleX(sc);
+            t.setScaleY(sc);
+            t.setRotationY(0);
+            pivotOnScreenEdge(t);
+            if (t == from) turnstile(t, false, TURN_SELECTED_DELAY, TURN_OUT_MS);
+            else turnstile(t, false, (long) (220 * screenFraction(t)), TURN_OUT_MS);
         }
         boolean white = from instanceof TileView ? ((TileView) from).whiteGlyph : whiteGlyph(a);
         splash.setBackgroundColor(from instanceof TileView ? ((TileView) from).color : tileColor(a.pkg, a.color));
@@ -1034,7 +1188,8 @@ public class StartActivity extends Activity implements Media.Listener {
         splash.setScaleY(sy);
         splash.setAlpha(0);
         splash.setVisibility(View.VISIBLE);
-        splash.animate().scaleX(1).scaleY(1).alpha(1).setStartDelay(70).setDuration(190)
+        // The splash takes over once the chosen tile is well into its swing.
+        splash.animate().scaleX(1).scaleY(1).alpha(1).setStartDelay(TURN_SELECTED_DELAY + TURN_OUT_MS * 6 / 10).setDuration(300)
                 .setInterpolator(new DecelerateInterpolator(1.5f))
                 .withEndAction(() -> startApp(a.intent(), ActivityOptions.makeCustomAnimation(this, R.anim.app_in, R.anim.hold).toBundle()))
                 .start();
@@ -1051,6 +1206,23 @@ public class StartActivity extends Activity implements Media.Listener {
             playEntrance();
             toast("Couldn't open app");
         }
+    }
+
+    /** Google Assistant / voice search, whichever this TV has; it opens listening. */
+    void voiceSearch() {
+        for (String action : new String[]{Intent.ACTION_ASSIST, "android.search.action.GLOBAL_SEARCH", Intent.ACTION_WEB_SEARCH}) {
+            try {
+                startActivity(new Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                return;
+            } catch (Exception ignored) { }
+        }
+        toast("No voice assistant on this TV");
+    }
+
+    @Override
+    public boolean onSearchRequested() {
+        voiceSearch();
+        return true;
     }
 
     void startSafe(Intent i) {
@@ -1106,7 +1278,7 @@ public class StartActivity extends Activity implements Media.Listener {
                 float in = getWidth() * .18f;
                 r.set(in, in, getWidth() - in, getHeight() - in);
                 if (white) p.setColorFilter(new android.graphics.PorterDuffColorFilter(Color.WHITE, android.graphics.PorterDuff.Mode.SRC_IN));
-                Bitmap g = white && mono(a) != null ? mono(a) : glyph(a);
+                Bitmap g = thumb(a, white);
                 if (g != null) c.drawBitmap(g, null, r, p);
             }
         };
@@ -1413,6 +1585,20 @@ public class StartActivity extends Activity implements Media.Listener {
         startButton.animate().scaleX(sc).scaleY(sc).setDuration(150).start();
     }
 
+    /** Centres the status-bar label just under the focused icon (once the new text has been measured). */
+    void placeHint(View icon) {
+        statusHint.setAlpha(0);
+        statusHint.post(() -> {
+            View header = (View) statusHint.getParent();
+            int[] hl = new int[2], il = new int[2];
+            header.getLocationInWindow(hl);
+            icon.getLocationInWindow(il);
+            statusHint.setX(il[0] - hl[0] + icon.getWidth() / 2f - statusHint.getWidth() / 2f);
+            statusHint.setY(il[1] - hl[1] + icon.getHeight() + dp(8));
+            statusHint.setAlpha(1);
+        });
+    }
+
     static final int REQ_IMAGES = 7;
 
     void pickImage() {
@@ -1515,7 +1701,7 @@ public class StartActivity extends Activity implements Media.Listener {
             if (a == null) continue;
             long mins = (now - Long.parseLong(s.substring(c + 1))) / 60000;
             String ago = mins < 1 ? "just now" : mins < 60 ? mins + " min ago" : (mins / 60) + " h ago";
-            item(b, glyph(a), a.label, "Used " + ago + " · select to close", v -> {
+            item(b, thumb(a, false), a.label, "Used " + ago + " · select to close", v -> {
                 closeApp(pkg);
                 toast("Closed " + a.label);
                 refreshStats();
@@ -1550,14 +1736,7 @@ public class StartActivity extends Activity implements Media.Listener {
                 toast("Closed " + a.label);
             });
         }
-        final int size = tileSize(k), next = size % 3 + 1;
-        item(b, null, "Size: " + SIZE_NAMES[size], "Select for " + SIZE_NAMES[next], v -> {
-            prefs.edit().putInt("size_" + k, next).apply();
-            closeFlyout();
-            buildTiles();
-        });
-        item(b, null, "Move left", null, v -> move(k, -1));
-        item(b, null, "Move right", null, v -> move(k, 1));
+        item(b, null, "Move", "Then use the arrows to place it", v -> { closeFlyout(); startMove(t); });
         if (a != null && media.item(a.pkg) != null) item(b, null, "Clear what's playing", "Remove it from this live tile", v -> {
             media.forget(a.pkg);
             closeFlyout();
@@ -1571,6 +1750,18 @@ public class StartActivity extends Activity implements Media.Listener {
             closeFlyout();
             startSafe(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + a.pkg)));
         });
+        caption(b, "Size");
+        final int size = tileSize(k);
+        for (int sz = 1; sz <= 3; sz++) {
+            final int pick = sz;
+            item(b, null, SIZE_NAMES[sz] + (sz == size ? "  \u2713" : ""), null, v -> {
+                closeFlyout();
+                if (pick == size) return;
+                prefs.edit().putInt("size_" + k, pick).apply();
+                focusKey = k;
+                buildTiles();
+            });
+        }
         caption(b, a != null ? "Tile colour (first swatch: app colour)" : "Tile colour");
         int[] cols = new int[PALETTE.length + 1];
         cols[0] = APP_COLOURS;
@@ -1585,13 +1776,111 @@ public class StartActivity extends Activity implements Media.Listener {
         focusFirst();
     }
 
-    void move(String key, int dir) {
-        List<String> o = pins();
-        int i = o.indexOf(key), j = i + dir;
-        if (i < 0 || j < 0 || j >= o.size()) return;
-        Collections.swap(o, i, j);
-        savePins(o);
-        // Keep the menu open so the tile can be nudged several places in a row.
-        buildTiles();
+    // ---------------------------------------------------------------- moving tiles
+
+    TileView moving;
+    TextView moveHint;
+
+    /** Windows 8 rearrange: the tile lifts, the rest dim, and the arrows carry it around the grid. */
+    void startMove(TileView t) {
+        moving = t;
+        t.requestFocus();
+        for (TileView o : tiles) o.animate().alpha(o == t ? 1 : 0.45f).setDuration(180).start();
+        t.animate().scaleX(1.1f).scaleY(1.1f).setDuration(180).start();
+        if (moveHint == null) {
+            moveHint = text("", 14, Fonts.REG);
+            moveHint.setBackgroundColor(0xEE1D1D1D);
+            moveHint.setPadding(dp(18), dp(11), dp(18), dp(11));
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+            lp.bottomMargin = dp(18);
+            root.addView(moveHint, lp);
+        }
+        moveHint.setText("Moving " + t.label + ": use the arrows, then press OK");
+        moveHint.setAlpha(0);
+        moveHint.setVisibility(View.VISIBLE);
+        moveHint.animate().alpha(1).setDuration(200).start();
+    }
+
+    void endMove() {
+        TileView t = moving;
+        moving = null;
+        if (moveHint != null) moveHint.animate().alpha(0).setDuration(150).withEndAction(() -> moveHint.setVisibility(View.GONE)).start();
+        for (TileView o : tiles) o.animate().alpha(1).setDuration(180).start();
+        if (t != null) {
+            float sc = t.isFocused() ? 1.04f : 1f;
+            t.animate().scaleX(sc).scaleY(sc).setDuration(180).start();
+        }
+    }
+
+    /**
+     * Moves the lifted tile one step in a direction. Tiles are packed in order, so every possible
+     * place in that order is tried and the one landing nearest the next spot in that direction wins.
+     */
+    void moveBy(int dx, int dy) {
+        int i = tiles.indexOf(moving), n = tiles.size();
+        if (i < 0) return;
+        int[] w = new int[n], hh = new int[n];
+        for (int k = 0; k < n; k++) {
+            TileGrid.LP lp = (TileGrid.LP) tiles.get(k).getLayoutParams();
+            w[k] = lp.w;
+            hh[k] = lp.h;
+        }
+        int[] now = TileGrid.pack(w, hh, grid.rows)[i];
+        int best = -1;
+        long bestScore = Long.MAX_VALUE;
+        for (int j = 0; j < n; j++) {
+            if (j == i) continue;
+            // The order with the lifted tile taken out and put back in at j.
+            List<Integer> order = new ArrayList<>();
+            for (int k = 0; k < n; k++) if (k != i) order.add(k);
+            order.add(j, i);
+            int[] w2 = new int[n], h2 = new int[n];
+            for (int k = 0; k < n; k++) {
+                w2[k] = w[order.get(k)];
+                h2[k] = hh[order.get(k)];
+            }
+            int[] at = TileGrid.pack(w2, h2, grid.rows)[j];
+            int ddx = at[0] - now[0], ddy = at[1] - now[1];
+            boolean ok = dx < 0 ? ddx < 0 : dx > 0 ? ddx > 0 : dy < 0 ? ddy < 0 : ddy > 0;
+            if (!ok) continue;
+            // Nearest along the direction first, then the least sideways drift, then the fewest tiles shuffled.
+            long along = dx != 0 ? Math.abs(ddx) : Math.abs(ddy), across = dx != 0 ? Math.abs(ddy) : Math.abs(ddx);
+            long score = along * 10000 + across * 100 + Math.abs(j - i);
+            if (score < bestScore) { bestScore = score; best = j; }
+        }
+        if (best < 0) {
+            // Nowhere to go that way: a small nudge says so.
+            float o = dp(10) * (dx + dy);
+            moving.animate().translationX(dx != 0 ? o : 0).translationY(dy != 0 ? o : 0).setDuration(80)
+                    .withEndAction(() -> moving.animate().translationX(0).translationY(0).setDuration(120).start()).start();
+            return;
+        }
+        TileView t = moving;
+        tiles.remove(i);
+        tiles.add(best, t);
+        grid.moveChild(t, best);
+        List<String> order = new ArrayList<>();
+        for (TileView v : tiles) order.add(key(v));
+        savePins(order);
+        t.post(() -> t.requestRectangleOnScreen(new Rect(0, 0, t.getWidth(), t.getHeight())));
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent e) {
+        if (moving == null) return super.dispatchKeyEvent(e);
+        int c = e.getKeyCode();
+        boolean down = e.getAction() == KeyEvent.ACTION_DOWN;
+        switch (c) {
+            case KeyEvent.KEYCODE_DPAD_LEFT: if (down) moveBy(-1, 0); return true;
+            case KeyEvent.KEYCODE_DPAD_RIGHT: if (down) moveBy(1, 0); return true;
+            case KeyEvent.KEYCODE_DPAD_UP: if (down) moveBy(0, -1); return true;
+            case KeyEvent.KEYCODE_DPAD_DOWN: if (down) moveBy(0, 1); return true;
+            case KeyEvent.KEYCODE_DPAD_CENTER: case KeyEvent.KEYCODE_ENTER: case KeyEvent.KEYCODE_BACK:
+            case KeyEvent.KEYCODE_MENU: case KeyEvent.KEYCODE_ESCAPE:
+                if (!down) endMove();
+                return true;
+            default:
+                return super.dispatchKeyEvent(e);
+        }
     }
 }
