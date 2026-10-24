@@ -3,6 +3,9 @@ package com.metro.launcher;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.net.Uri;
 import android.media.MediaMetadata;
 import android.media.session.MediaController;
 import android.media.session.MediaSessionManager;
@@ -11,10 +14,14 @@ import android.os.Handler;
 import android.os.Looper;
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Tracks what each app is playing through the system media sessions (needs notification-listener
@@ -29,6 +36,11 @@ final class Media implements MediaSessionManager.OnActiveSessionsChangedListener
         boolean playing, active;
         long when, duration, position, positionAt;
         float speed = 1;
+        /** Cover art or video thumbnail, and the title it belongs to; read back from disk on demand. */
+        Bitmap art;
+        String artFor;
+        int artPx;
+        boolean artLoaded;
 
         /** Playback progress 0-1, or -1 when the app doesn't report a duration. */
         float progress() {
@@ -40,6 +52,8 @@ final class Media implements MediaSessionManager.OnActiveSessionsChangedListener
     }
 
     static final long KEEP_MS = 7 * 24 * 3600_000L;
+    /** Art is kept small: a tile shows it at most ~450 px across, and RGB_565 halves the memory again. */
+    static final int ART_PX = 320;
 
     private static Media inst;
 
@@ -55,11 +69,18 @@ final class Media implements MediaSessionManager.OnActiveSessionsChangedListener
     final Map<MediaController, MediaController.Callback> sessions = new HashMap<>();
     Listener listener;
     boolean started;
+    /** One thread for art, so deleting an old cover and writing the next one can't overtake each other. */
+    final ExecutorService io = Executors.newSingleThreadExecutor();
 
     private Media(Context c) {
         ctx = c;
         prefs = c.getSharedPreferences("media", Context.MODE_PRIVATE);
         long now = System.currentTimeMillis();
+        // Development builds kept covers here without knowing which title they went with.
+        io.execute(() -> {
+            File[] old = new File(c.getFilesDir(), "media").listFiles();
+            if (old != null) for (File f : old) f.delete();
+        });
         for (Map.Entry<String, ?> e : prefs.getAll().entrySet()) {
             String[] f = String.valueOf(e.getValue()).split("\t", -1);
             if (f.length < 3) continue;
@@ -73,6 +94,8 @@ final class Media implements MediaSessionManager.OnActiveSessionsChangedListener
                 it.duration = Long.parseLong(f[4]);
             }
             if (now - it.when > KEEP_MS) continue;
+            // The saved cover, if any, belongs to the saved title.
+            it.artFor = it.title;
             items.put(it.pkg, it);
         }
     }
@@ -130,6 +153,15 @@ final class Media implements MediaSessionManager.OnActiveSessionsChangedListener
         }
         boolean newTrack = !title.equals(it.title);
         it.title = title;
+        if (newTrack) {
+            it.art = null;
+            it.artFor = null;
+            it.artPx = 0;
+            it.artLoaded = true;
+            final File f = artFile(pkg);
+            io.execute(f::delete);
+        }
+        art(it, md);
         it.sub = first(md, MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE, MediaMetadata.METADATA_KEY_ARTIST,
                 MediaMetadata.METADATA_KEY_ALBUM_ARTIST, MediaMetadata.METADATA_KEY_ALBUM);
         it.active = true;
@@ -139,6 +171,72 @@ final class Media implements MediaSessionManager.OnActiveSessionsChangedListener
         position(it, st);
         prefs.edit().putString(pkg, it.when + "\t" + clean(it.title) + "\t" + clean(it.sub) + "\t" + it.position + "\t" + it.duration).apply();
         changed();
+    }
+
+    /**
+     * Apps hand over art as a bitmap, or as a URI. Only local URIs can be read: web ones would need
+     * the internet permission, which this launcher deliberately doesn't have.
+     */
+    void art(final Item it, MediaMetadata md) {
+        Bitmap b = null;
+        for (String k : new String[]{MediaMetadata.METADATA_KEY_ART, MediaMetadata.METADATA_KEY_ALBUM_ART, MediaMetadata.METADATA_KEY_DISPLAY_ICON}) {
+            b = md.getBitmap(k);
+            if (b != null) break;
+        }
+        String uri = null;
+        if (b == null) for (String k : new String[]{MediaMetadata.METADATA_KEY_ART_URI, MediaMetadata.METADATA_KEY_ALBUM_ART_URI, MediaMetadata.METADATA_KEY_DISPLAY_ICON_URI}) {
+            String u = md.getString(k);
+            if (u != null && (u.startsWith("content:") || u.startsWith("android.resource:") || u.startsWith("file:"))) { uri = u; break; }
+        }
+        if (b == null && uri == null) return;
+        // Apps often send a small icon first and the full cover a moment later: take the bigger one.
+        int size = b != null ? Math.min(b.getWidth(), b.getHeight()) : ART_PX;
+        if (it.title.equals(it.artFor) && size <= it.artPx) return;
+        final String title = it.title, pkg = it.pkg, src = uri;
+        it.artFor = title;
+        it.artPx = size;
+        final Bitmap given = b;
+        io.execute(() -> {
+            Bitmap full = given;
+            if (full == null) {
+                try (InputStream in = ctx.getContentResolver().openInputStream(Uri.parse(src))) {
+                    full = BitmapFactory.decodeStream(in);
+                } catch (Exception ignored) { }
+            }
+            if (full == null || full.getWidth() < 8 || full.getHeight() < 8) return;
+            final Bitmap small = shrink(full);
+            try (FileOutputStream out = new FileOutputStream(artFile(pkg))) {
+                small.compress(Bitmap.CompressFormat.JPEG, 88, out);
+            } catch (Exception ignored) { }
+            h.post(() -> {
+                if (!title.equals(it.title)) return;
+                it.art = small;
+                it.artLoaded = true;
+                changed();
+            });
+        });
+    }
+
+    static Bitmap shrink(Bitmap b) {
+        float s = Math.min(1f, ART_PX / (float) Math.min(b.getWidth(), b.getHeight()));
+        Bitmap scaled = Bitmap.createScaledBitmap(b, Math.max(1, Math.round(b.getWidth() * s)), Math.max(1, Math.round(b.getHeight() * s)), true);
+        Bitmap out = scaled.copy(Bitmap.Config.RGB_565, false);
+        if (scaled != b) scaled.recycle();
+        return out != null ? out : b;
+    }
+
+    /** The item's art, decoded from disk the first time it's needed. */
+    Bitmap art(Item it) {
+        if (!it.artLoaded) {
+            it.artLoaded = true;
+            File f = artFile(it.pkg);
+            if (f.exists()) {
+                BitmapFactory.Options o = new BitmapFactory.Options();
+                o.inPreferredConfig = Bitmap.Config.RGB_565;
+                it.art = BitmapFactory.decodeFile(f.getPath(), o);
+            }
+        }
+        return it.art;
     }
 
     static void position(Item it, PlaybackState st) {
@@ -159,7 +257,9 @@ final class Media implements MediaSessionManager.OnActiveSessionsChangedListener
     }
 
     File artFile(String pkg) {
-        return new File(new File(ctx.getFilesDir(), "media"), pkg + ".jpg");
+        File dir = new File(ctx.getFilesDir(), "art");
+        dir.mkdirs();
+        return new File(dir, pkg + ".jpg");
     }
 
     void changed() {
@@ -191,7 +291,8 @@ final class Media implements MediaSessionManager.OnActiveSessionsChangedListener
     void forget(String pkg) {
         items.remove(pkg);
         prefs.edit().remove(pkg).apply();
-        artFile(pkg).delete();
+        final File f = artFile(pkg);
+        io.execute(f::delete);
         changed();
     }
 

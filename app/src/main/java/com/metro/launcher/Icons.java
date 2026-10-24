@@ -248,6 +248,79 @@ final class Icons {
         return out;
     }
 
+    /**
+     * The logo as a white silhouette for accent tiles. Painting every pixel white would fill in the
+     * details (VLC's stripes, a play button's triangle), so flat-coloured parts mostly surrounded by
+     * the logo's main colour are cut out instead, the way Windows 8 drew its logos. Parts that sit on
+     * the outside, like a wordmark beside a symbol, stay white.
+     */
+    static Bitmap mono(Bitmap bm) {
+        int w = bm.getWidth(), h = bm.getHeight(), n = w * h;
+        int[] p = new int[n];
+        bm.getPixels(p, 0, w, 0, 0, w, h);
+        int[] count = new int[4096];
+        long[] sr = new long[4096], sg = new long[4096], sb = new long[4096];
+        int solid = 0;
+        for (int c : p) {
+            if ((c >>> 24) < 160) continue;
+            solid++;
+            int k = ((c >> 12) & 0xF00) | ((c >> 8) & 0xF0) | ((c >> 4) & 0xF);
+            count[k]++;
+            sr[k] += Color.red(c); sg[k] += Color.green(c); sb[k] += Color.blue(c);
+        }
+        int best = 0;
+        for (int k = 1; k < 4096; k++) if (count[k] > count[best]) best = k;
+        int[] out = new int[n];
+        if (count[best] == 0) return bm.copy(Bitmap.Config.ARGB_8888, false);
+        int body = Color.rgb((int) (sr[best] / count[best]), (int) (sg[best] / count[best]), (int) (sb[best] / count[best]));
+
+        // How strongly each pixel stands out from the main colour, 0-1.
+        float[] k = new float[n];
+        for (int i = 0; i < n; i++) if ((p[i] >>> 24) > 24) k[i] = Math.max(0, Math.min(1, (dist(p[i], body) - 60) / 80f));
+
+        // Group the standout pixels into parts and decide, per part, whether it's a cut-out.
+        int[] comp = new int[n], queue = new int[n];
+        java.util.Arrays.fill(comp, -1);
+        boolean[] cut = new boolean[n];
+        int parts = 0;
+        for (int i = 0; i < n; i++) {
+            if (k[i] <= 0.5f || comp[i] >= 0) continue;
+            int id = parts++, head = 0, tail = 0, inner = 0, outer = 0, size = 0;
+            long mr = 0, mg = 0, mb = 0, vr = 0, vg = 0, vb = 0;
+            comp[i] = id;
+            queue[tail++] = i;
+            while (head < tail) {
+                int j = queue[head++], x = j % w, y = j / w, c = p[j];
+                size++;
+                mr += Color.red(c); mg += Color.green(c); mb += Color.blue(c);
+                vr += Color.red(c) * Color.red(c); vg += Color.green(c) * Color.green(c); vb += Color.blue(c) * Color.blue(c);
+                for (int dir = 0; dir < 4; dir++) {
+                    int nx = x + (dir == 0 ? 1 : dir == 1 ? -1 : 0), ny = y + (dir == 2 ? 1 : dir == 3 ? -1 : 0);
+                    if (nx < 0 || ny < 0 || nx >= w || ny >= h) { outer++; continue; }
+                    int m = ny * w + nx;
+                    if ((p[m] >>> 24) <= 24) outer++;
+                    else if (k[m] > 0.5f) { if (comp[m] < 0) { comp[m] = id; queue[tail++] = m; } }
+                    else inner++;
+                }
+            }
+            // A cut-out is a flat colour (not shading) of some size, enclosed mostly by the logo.
+            float spread = (float) Math.sqrt(Math.max(vr / (double) size - Math.pow(mr / (double) size, 2),
+                    Math.max(vg / (double) size - Math.pow(mg / (double) size, 2), vb / (double) size - Math.pow(mb / (double) size, 2))));
+            if (inner > outer * 1.3f && size >= solid * 0.015f && spread < 28) for (int t = 0; t < tail; t++) cut[queue[t]] = true;
+        }
+        for (int i = 0; i < n; i++) {
+            float a = p[i] >>> 24;
+            if (cut[i]) a *= 1 - k[i];
+            else if (k[i] > 0) {
+                // Soften the anti-aliased rim around a cut-out too.
+                int x = i % w, y = i / w;
+                if ((x > 0 && cut[i - 1]) || (x < w - 1 && cut[i + 1]) || (y > 0 && cut[i - w]) || (y < h - 1 && cut[i + w])) a *= 1 - k[i];
+            }
+            out[i] = ((int) a << 24) | 0xFFFFFF;
+        }
+        return Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888);
+    }
+
     static boolean neutral(int c) {
         float[] hsv = new float[3];
         Color.colorToHSV(c, hsv);

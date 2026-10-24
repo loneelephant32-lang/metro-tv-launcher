@@ -97,7 +97,7 @@ public class StartActivity extends Activity implements Media.Listener {
 
     static class App {
         String pkg, label, activity, cat;
-        Bitmap glyph;
+        Bitmap glyph, mono;
         int color;
         boolean white, picture;
 
@@ -257,6 +257,9 @@ public class StartActivity extends Activity implements Media.Listener {
         }
         media.listener = this;
         media.start();
+        // After an update the system can leave the listener unbound, and then nothing gets recorded while
+        // another app is in front. Asking for a rebind is free when it's already connected.
+        if (Build.VERSION.SDK_INT >= 24) android.service.notification.NotificationListenerService.requestRebind(new ComponentName(this, MediaListener.class));
         onMediaChanged();
         refreshRecentsAsync();
         h.post(ticker);
@@ -354,12 +357,16 @@ public class StartActivity extends Activity implements Media.Listener {
         FrameLayout header = new FrameLayout(this);
         header.setPadding(dp(42), dp(24), dp(52), 0);
         header.setClipChildren(false);
+        // The Start button's glow spills into the padding; clipping it there would draw a box edge.
+        header.setClipToPadding(false);
         // "Start" is the Start button: it opens the alphabetical Apps list.
         startButton = text("Start", 32, Fonts.REG);
         startButton.setPadding(dp(10), dp(4), dp(12), dp(6));
         startButton.setFocusable(true);
         startButton.setClickable(true);
         startButton.setOnClickListener(v -> openApps());
+        startButton.setOnFocusChangeListener((v, f) -> styleStart());
+        if (Build.VERSION.SDK_INT >= 26) startButton.setDefaultFocusHighlightEnabled(false);
         header.addView(startButton, new FrameLayout.LayoutParams(-2, -2, Gravity.START | Gravity.TOP));
 
         LinearLayout right = new LinearLayout(this);
@@ -453,6 +460,17 @@ public class StartActivity extends Activity implements Media.Listener {
         return new File(dir, pkg + ".png");
     }
 
+    File monoFile(String pkg) { return iconFile(pkg + ".m"); }
+
+    /** Make and save the white version of a logo (on a background thread where possible). */
+    void saveMono(String pkg, Bitmap glyph) {
+        Bitmap m = Icons.mono(glyph);
+        try (FileOutputStream out = new FileOutputStream(monoFile(pkg))) {
+            m.compress(Bitmap.CompressFormat.PNG, 100, out);
+        } catch (Exception ignored) { }
+        m.recycle();
+    }
+
     /** Rebuild the app list from the last scan; false if there's nothing usable cached yet. */
     boolean loadCachedApps() {
         String all = prefs.getString("apps", "");
@@ -482,10 +500,21 @@ public class StartActivity extends Activity implements Media.Listener {
         return a.glyph;
     }
 
+    /** The white logo, held as an alpha mask (a quarter of the memory); null for picture icons. */
+    Bitmap mono(App a) {
+        if (a.picture) return null;
+        if (a.mono == null) {
+            if (!monoFile(a.pkg).exists() && glyph(a) != null) saveMono(a.pkg, glyph(a));
+            Bitmap m = BitmapFactory.decodeFile(monoFile(a.pkg).getPath());
+            if (m != null) { a.mono = m.extractAlpha(); m.recycle(); }
+        }
+        return a.mono;
+    }
+
     /** Drop logos of apps that aren't pinned (they come back from the disk cache when needed). */
     void trimGlyphs() {
         Set<String> keep = new HashSet<>(pins());
-        for (App a : apps.values()) if (!keep.contains(a.pkg)) a.glyph = null;
+        for (App a : apps.values()) if (!keep.contains(a.pkg)) { a.glyph = null; a.mono = null; }
     }
 
     /** The app's highest-density icon (XXXHDPI art is far sharper than the TV-density one), else the normal icon. */
@@ -528,6 +557,7 @@ public class StartActivity extends Activity implements Media.Listener {
                     a.label = prev != null && meta.startsWith(stamp + ":") ? prev.label : String.valueOf(ri.loadLabel(pm));
                     if (meta.startsWith(stamp + ":") && prev != null) {
                         a.glyph = prev.glyph;
+                        a.mono = prev.mono;
                         a.color = prev.color;
                         a.white = prev.white;
                         a.picture = prev.picture;
@@ -547,8 +577,14 @@ public class StartActivity extends Activity implements Media.Listener {
                             try (FileOutputStream out = new FileOutputStream(iconFile(pkg))) {
                                 ic.glyph.compress(Bitmap.CompressFormat.PNG, 100, out);
                             } catch (Exception ignored) { }
+                            if (!ic.picture) saveMono(pkg, ic.glyph);
                             prefs.edit().putString("ic_" + pkg, stamp + ":" + a.color + ":" + (a.white ? 1 : 0) + ":" + (a.picture ? 1 : 0)).apply();
                         }
+                    }
+                    if (!a.picture && !monoFile(pkg).exists()) {
+                        Bitmap g = a.glyph != null ? a.glyph : BitmapFactory.decodeFile(iconFile(pkg).getPath());
+                        if (g != null) saveMono(pkg, g);
+                        if (g != null && g != a.glyph) g.recycle();
                     }
                     found.put(pkg, a);
                     if (list.length() > 0) list.append('\u001e');
@@ -566,6 +602,7 @@ public class StartActivity extends Activity implements Media.Listener {
                         if (p == null || !p.label.equals(a.label) || p.color != a.color || p.white != a.white) { same = false; break; }
                         // Keep whatever logo is already loaded.
                         if (a.glyph == null) a.glyph = p.glyph;
+                        if (a.mono == null) a.mono = p.mono;
                     }
                 }
                 if (same && !tiles.isEmpty()) return;
@@ -659,7 +696,7 @@ public class StartActivity extends Activity implements Media.Listener {
                 t.tag2 = a;
                 t.label = a.label;
                 t.brand = a.label;
-                t.setGlyph(glyph(a), whiteGlyph(a));
+                t.setGlyph(glyph(a), mono(a), whiteGlyph(a));
                 t.setColor(tileColor(k, a.color));
                 t.setOnClickListener(v -> launch(v, (App) ((TileView) v).tag2));
             }
@@ -701,6 +738,7 @@ public class StartActivity extends Activity implements Media.Listener {
             f.sub = it.sub;
             f.badge = it.playing ? "Playing" : "Resume";
             f.progress = it.progress();
+            f.art = media.art(it);
             t.setFaces(TileView.Face.icon(), f);
             String k = key(t);
             if (it.playing && !wasPlaying.contains(k)) {
@@ -983,7 +1021,7 @@ public class StartActivity extends Activity implements Media.Listener {
         }
         boolean white = from instanceof TileView ? ((TileView) from).whiteGlyph : whiteGlyph(a);
         splash.setBackgroundColor(from instanceof TileView ? ((TileView) from).color : tileColor(a.pkg, a.color));
-        BitmapDrawable icon = new BitmapDrawable(getResources(), glyph(a));
+        BitmapDrawable icon = new BitmapDrawable(getResources(), white && mono(a) != null ? mono(a) : glyph(a));
         if (white) icon.setColorFilter(Color.WHITE, android.graphics.PorterDuff.Mode.SRC_IN);
         splashIcon.setImageDrawable(icon);
         // Start the splash exactly over what was selected: with scale s, a pivot of L / (1 - s) keeps the left edge at L.
@@ -1068,7 +1106,7 @@ public class StartActivity extends Activity implements Media.Listener {
                 float in = getWidth() * .18f;
                 r.set(in, in, getWidth() - in, getHeight() - in);
                 if (white) p.setColorFilter(new android.graphics.PorterDuffColorFilter(Color.WHITE, android.graphics.PorterDuff.Mode.SRC_IN));
-                Bitmap g = glyph(a);
+                Bitmap g = white && mono(a) != null ? mono(a) : glyph(a);
                 if (g != null) c.drawBitmap(g, null, r, p);
             }
         };
@@ -1348,13 +1386,31 @@ public class StartActivity extends Activity implements Media.Listener {
             t.setShadowLayer(shadow, 0, dp(1), 0xCC000000);
         }
         date.setTextColor(light ? 0xFF555555 : 0xFFC8C8C8);
-        // The Start button highlights like any other focusable item.
-        android.graphics.drawable.StateListDrawable sb = new android.graphics.drawable.StateListDrawable();
-        sb.addState(new int[]{android.R.attr.state_focused}, new ColorDrawable(light ? 0x221D1D1D : 0x33FFFFFF));
-        sb.addState(new int[]{}, new ColorDrawable(0));
-        startButton.setBackground(sb);
+        styleStart();
         for (TileView t : tiles) { t.ringColor = fg; t.invalidate(); }
         if (wifiButton != null) for (View v : new View[]{wifiButton}) v.invalidate();
+    }
+
+    /**
+     * Selecting Start lights up the word itself, with no box around it: the text brightens and glows
+     * (or takes the accent colour on the white background, where a glow would only blur it).
+     */
+    void styleStart() {
+        int mode = prefs.getInt("bg", BG_BLACK);
+        boolean light = mode == BG_WHITE, on = startButton.isFocused();
+        int fg = light ? 0xFF1D1D1D : Color.WHITE;
+        if (on) {
+            startButton.setTextColor(light ? (accent() == APP_COLOURS ? PALETTE[0] : accent()) : fg);
+            if (light) startButton.setShadowLayer(0, 0, 0, 0);
+            else startButton.setShadowLayer(dp(16), 0, 0, 0xF2FFFFFF);
+        } else {
+            startButton.setTextColor(fg & 0xBFFFFFFF);
+            startButton.setShadowLayer(mode == BG_IMAGE ? dp(3) : 0, 0, dp(1), 0xCC000000);
+        }
+        startButton.setPivotX(0);
+        startButton.setPivotY(startButton.getHeight() / 2f);
+        float sc = on ? 1.08f : 1f;
+        startButton.animate().scaleX(sc).scaleY(sc).setDuration(150).start();
     }
 
     static final int REQ_IMAGES = 7;

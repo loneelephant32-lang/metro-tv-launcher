@@ -6,11 +6,13 @@ import android.graphics.Bitmap;
 import android.graphics.BlurMaskFilter;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.PorterDuff;
 import android.graphics.PorterDuffColorFilter;
 import android.graphics.Rect;
 import android.graphics.RectF;
+import android.graphics.Shader;
 import android.text.TextUtils;
 import android.text.TextPaint;
 import android.view.View;
@@ -33,6 +35,8 @@ public class TileView extends View {
         String caption, title, sub, badge;
         float progress = -1;
         boolean live, playing;
+        /** Cover art or a video thumbnail, filling the tile behind the usual text. */
+        Bitmap art;
 
         static Face icon() { return new Face(); }
 
@@ -48,7 +52,8 @@ public class TileView extends View {
     }
 
     int color = 0xFF1BA1E2, ringColor = 0xFFFFFFFF;
-    Bitmap glyph;
+    /** The logo in colour, and as a white-silhouette alpha mask for accent tiles and white brand marks. */
+    Bitmap glyph, mono;
     Rect glyphBounds;
     boolean whiteGlyph;
     int sysGlyph;
@@ -78,7 +83,9 @@ public class TileView extends View {
      */
     private static Bitmap glowSprite;
     private static int glowR;
-    private final Rect gs = new Rect();
+    private final Rect gs = new Rect(), artSrc = new Rect();
+    /** Darkens the top and bottom of artwork so the brand mark and text stay readable on any picture. */
+    private final Paint scrim = new Paint();
 
     public TileView(Context c) {
         super(c);
@@ -136,14 +143,18 @@ public class TileView extends View {
         super.onSizeChanged(w, h, ow, oh);
         fitted.clear();
         fittedUpper.clear();
+        scrim.setShader(new LinearGradient(0, 0, 0, h, new int[]{0x8C000000, 0x14000000, 0x33000000, 0xD9000000},
+                new float[]{0, 0.32f, 0.5f, 1}, Shader.TileMode.CLAMP));
     }
 
     void setColor(int c) { color = c; invalidate(); }
 
-    void setGlyph(Bitmap g, boolean whiteG) {
+    void setGlyph(Bitmap g, Bitmap m, boolean whiteG) {
         // Logos are drawn well below their stored size; mipmaps keep that shrink cheap on the GPU and free of shimmer.
         if (g != null) g.setHasMipMap(true);
+        if (m != null) m.setHasMipMap(true);
         glyph = g;
+        mono = m;
         whiteGlyph = whiteG;
         glyphBounds = g == null ? null : Icons.bounds(g);
         invalidate();
@@ -254,7 +265,8 @@ public class TileView extends View {
     private void drawFace(Canvas c, Face f, int w, int h) {
         boolean big = wide(w), huge = big && tall(h);
         float pad = (huge ? 22 : big ? 18 : 15) * d;
-        if (big && glyph != null) drawWatermark(c, w, h);
+        if (f.art != null) drawArt(c, f.art, w, h);
+        else if (big && glyph != null) drawWatermark(c, w, h);
         TextPaint titleBig = huge ? hugeP : bigP;
 
         if (f.type == ICON) {
@@ -324,7 +336,8 @@ public class TileView extends View {
             if (glyphBounds.width() * s > maxW) s = maxW / glyphBounds.width();
             float gw = glyphBounds.width() * s, gh = glyphBounds.height() * s;
             dst.set(x, y + (boxH - gh) / 2, x + gw, y + (boxH + gh) / 2);
-            c.drawBitmap(glyph, glyphBounds, dst, forceWhite ? white : bmp);
+            if (forceWhite && mono != null) c.drawBitmap(mono, glyphBounds, dst, white);
+            else c.drawBitmap(glyph, glyphBounds, dst, forceWhite && whiteGlyph ? white : bmp);
             return x + gw;
         }
         if (sysGlyph != Glyphs.NONE) {
@@ -335,6 +348,21 @@ public class TileView extends View {
         return x;
     }
 
+    /** Centre-crops the art to the tile, then lays the scrim over it. */
+    private void drawArt(Canvas c, Bitmap art, int w, int h) {
+        int aw = art.getWidth(), ah = art.getHeight();
+        if (aw * h > ah * w) {
+            int cw = ah * w / h;
+            artSrc.set((aw - cw) / 2, 0, (aw + cw) / 2, ah);
+        } else {
+            int ch = aw * h / w;
+            artSrc.set(0, (ah - ch) / 2, aw, (ah + ch) / 2);
+        }
+        dst.set(0, 0, w, h);
+        c.drawBitmap(art, artSrc, dst, bmp);
+        c.drawRect(0, 0, w, h, scrim);
+    }
+
     private void drawWatermark(Canvas c, int w, int h) {
         if (glyphBounds == null) return;
         float gh = h * (tall(h) ? 0.6f : 0.78f), s = gh / glyphBounds.height();
@@ -343,7 +371,7 @@ public class TileView extends View {
         gh = glyphBounds.height() * s;
         float right = w + gw * 0.12f, bottom = h + gh * 0.14f;
         dst.set(right - gw, bottom - gh, right, bottom);
-        c.drawBitmap(glyph, glyphBounds, dst, mark);
+        c.drawBitmap(mono != null ? mono : glyph, glyphBounds, dst, mark);
     }
 
     private void drawBadge(Canvas c, String s, float right, float top) {

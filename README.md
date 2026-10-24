@@ -7,9 +7,9 @@ A tiny, fast home screen for Android TV that brings back the Windows 8 Start scr
 ## Features
 
 - **Big Metro tiles** in three sizes: Small (1×1), Wide (2×1) and Large (2×2). Each tile takes its app's own colour, with the logo sitting directly on it.
-- **Live tiles.** Media apps show what's playing or was played last (title, artist or channel, progress), and a System tile flips between RAM and storage use.
+- **Live tiles.** Media apps show what's playing or was played last (title, artist or channel, progress) over the album cover or video thumbnail, and a System tile flips between RAM and storage use.
 - **Windows 8 animations.** Tiles swing away in a turnstile and the app's colour zooms up when you open something; tiles fly back in when you return.
-- **Themes:** Black, White, four dark gradients (Midnight, Aurora, Ember, Graphite), or your own image. Pick one of the 20 Windows 8 accent colours to theme every tile with white logos.
+- **Themes:** Black, White, four dark gradients (Midnight, Aurora, Ember, Graphite), or your own image. Pick one of the 20 Windows 8 accent colours to theme every tile with white logos that keep their cut-out details.
 - **Start menu.** Select "Start" for every app in alphabetical order, and pin or unpin any of them.
 - **Status bar** with Personalize, Recent apps, Settings and Wi-Fi shortcuts, plus the time.
 - **Close apps:** close background apps one at a time from Recent apps, or all at once.
@@ -114,6 +114,7 @@ Install the newer APK the same way. Updates install over the old version and kee
 
 ## Good to know
 
+- **Live tiles depend on the app.** Metro shows what an app chooses to share with the TV. On the test TV, Spotify and YouTube share the title and a cover or thumbnail; JioHotstar shares the title but no picture; Netflix shares nothing, so its tile stays plain. Pictures only available as a web link aren't loaded, because Metro has no internet access.
 - **"Close app" only stops apps running in the background.** Fully force-stopping other apps needs system privileges that no launcher has.
 - **Music stopping after you press Home isn't caused by the launcher.** Some TVs, TCL models in particular, freeze or kill background apps to save memory; on the test TV Android itself killed Spotify's background service. Other launchers behave the same there.
 - **How smooth it feels depends on your TV.** Budget TV graphics chips may run around 30–50 fps; the launcher avoids needless redraws to make the most of them.
