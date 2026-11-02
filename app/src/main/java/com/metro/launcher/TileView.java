@@ -96,8 +96,8 @@ public class TileView extends View {
         capP.setLetterSpacing(0.1f);
         text(brandP, Fonts.MED, 11.5f, 0xFFFFFFFF);
         brandP.setLetterSpacing(0.12f);
-        text(bigP, Fonts.REG, 24f, 0xFFFFFFFF);
-        text(hugeP, Fonts.REG, 31f, 0xFFFFFFFF);
+        text(bigP, Fonts.MED, 24f, 0xFFFFFFFF);
+        text(hugeP, Fonts.MED, 31f, 0xFFFFFFFF);
         text(titleP, Fonts.MED, 15.5f, 0xFFFFFFFF);
         text(subP, Fonts.MED, 12f, 0xE6FFFFFF);
         text(badgeP, Fonts.MED, 10f, 0xFFFFFFFF);

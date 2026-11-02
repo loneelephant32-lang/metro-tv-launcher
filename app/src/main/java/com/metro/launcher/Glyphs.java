@@ -8,7 +8,7 @@ import android.graphics.RectF;
 /** Line-art system icons in the spirit of the Windows 8 glyphs, drawn with whatever colour the paint has. */
 final class Glyphs {
     static final int NONE = 0, CLOSE = 1, RECENT = 2, PERSONALIZE = 3, APPS = 4, MUSIC = 5, SETTINGS = 6,
-            WIFI = 7, ETHERNET = 8, NO_NETWORK = 9, MEMORY = 10, MIC = 11;
+            WIFI = 7, ETHERNET = 8, NO_NETWORK = 9, MEMORY = 10, MIC = 11, INPUT = 12, HDMI = 13, AV = 14, TV = 15;
 
     private static final Path path = new Path();
     private static final RectF oval = new RectF();
@@ -107,6 +107,41 @@ final class Glyphs {
                 c.drawArc(oval, 0, 180, false, p);
                 c.drawLine(cx, cy + r * .5f, cx, cy + r * .9f, p);
                 c.drawLine(cx - r * .3f, cy + r * .9f, cx + r * .3f, cy + r * .9f, p);
+                break;
+            }
+            case INPUT: {
+                // A screen with an arrow coming in from the left: switching sources.
+                c.drawRect(cx - r * .45f, cy - r * .72f, cx + r, cy + r * .5f, p);
+                c.drawLine(cx - r * .1f, cy + r * .9f, cx + r * .65f, cy + r * .9f, p);
+                c.drawLine(cx - r, cy - r * .11f, cx + r * .3f, cy - r * .11f, p);
+                c.drawLine(cx + r * .3f, cy - r * .11f, cx + r * .02f, cy - r * .39f, p);
+                c.drawLine(cx + r * .3f, cy - r * .11f, cx + r * .02f, cy + r * .17f, p);
+                break;
+            }
+            case HDMI: {
+                // An HDMI port: a wide plug, its lower corners cut, with the contact strip inside.
+                path.reset();
+                float w = r, top = cy - r * .42f, bot = cy + r * .42f;
+                path.moveTo(cx - w, top);
+                path.lineTo(cx + w, top);
+                path.lineTo(cx + w, cy + r * .05f);
+                path.lineTo(cx + w * .7f, bot);
+                path.lineTo(cx - w * .7f, bot);
+                path.lineTo(cx - w, cy + r * .05f);
+                path.close();
+                c.drawPath(path, p);
+                c.drawLine(cx - w * .55f, cy - r * .02f, cx + w * .55f, cy - r * .02f, p);
+                break;
+            }
+            case AV: {
+                // Two RCA sockets.
+                c.drawCircle(cx - r * .45f, cy, r * .38f, p);
+                c.drawCircle(cx + r * .45f, cy, r * .38f, p);
+                break;
+            }
+            case TV: {
+                c.drawRect(cx - r, cy - r * .7f, cx + r, cy + r * .45f, p);
+                c.drawLine(cx - r * .4f, cy + r * .85f, cx + r * .4f, cy + r * .85f, p);
                 break;
             }
             case MEMORY: {

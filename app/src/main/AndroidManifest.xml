@@ -6,6 +6,15 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <!-- Only used once Internet access is switched on in Personalize (Bing images, weather, update checks). -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- In-app updates: Android still asks the user to confirm every install. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Layout backups go to Pictures; Android 10+ needs no permission for that. -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+    <!-- Optional, granted over adb: lets the Bing screensaver switch choose the screensaver itself, on TVs
+         without a screensaver menu. adb shell pm grant com.metro.launcher android.permission.WRITE_SECURE_SETTINGS -->
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" xmlns:tools="http://schemas.android.com/tools" tools:ignore="ProtectedPermissions" />
     <!-- Granted with: adb shell appops set com.metro.launcher GET_USAGE_STATS allow -->
     <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" xmlns:tools="http://schemas.android.com/tools" tools:ignore="ProtectedPermissions" />
 
@@ -54,5 +63,19 @@
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
         </service>
+        <!-- Bing screensaver: off until switched on in Personalize; Android's screensaver settings pick it. -->
+        <service
+            android:name=".BingDream"
+            android:exported="true"
+            android:enabled="false"
+            android:label="Metro: Bing images"
+            android:permission="android.permission.BIND_DREAM_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.dreams.DreamService" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </service>
+        <!-- Result of an in-app update install; only reachable through Metro's own PendingIntent. -->
+        <receiver android:name=".InstallReceiver" android:exported="false" />
     </application>
 </manifest>

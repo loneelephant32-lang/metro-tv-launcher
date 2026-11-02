@@ -71,7 +71,7 @@ public class StartActivity extends Activity implements Media.Listener {
             0xFF647687, 0xFF76608A, 0xFF6D8764, 0xFF87794E};
     /** Accent value meaning "every tile takes its app's own colour". */
     static final int APP_COLOURS = 0;
-    static final int BG_BLACK = 0, BG_WHITE = 1, BG_IMAGE = 2, BG_MIDNIGHT = 3, BG_AURORA = 4, BG_EMBER = 5, BG_GRAPHITE = 6;
+    static final int BG_BLACK = 0, BG_WHITE = 1, BG_IMAGE = 2, BG_MIDNIGHT = 3, BG_AURORA = 4, BG_EMBER = 5, BG_GRAPHITE = 6, BG_BING = 7;
     /** Dark themes: a subtle diagonal fade, top-left to bottom-right. */
     static final int[][] THEME_GRADIENTS = {
             {0xFF101B3A, 0xFF080C1C, 0xFF030407},   // Midnight: deep navy into black
@@ -81,6 +81,9 @@ public class StartActivity extends Activity implements Media.Listener {
     static final String[] THEME_NAMES = {"Midnight", "Aurora", "Ember", "Graphite"};
 
     static boolean isGradient(int mode) { return mode >= BG_MIDNIGHT && mode <= BG_GRAPHITE; }
+
+    /** Photo backgrounds get the same dimming and text shadows. */
+    static boolean isPhoto(int mode) { return mode == BG_IMAGE || mode == BG_BING; }
 
     static android.graphics.drawable.GradientDrawable gradient(int mode) {
         android.graphics.drawable.GradientDrawable g = new android.graphics.drawable.GradientDrawable(
@@ -129,6 +132,14 @@ public class StartActivity extends Activity implements Media.Listener {
         float pos, vel, target;
         long lastFrame;
         boolean gliding;
+        /** Told about every scroll step (the page dashes follow it). */
+        Runnable onScroll;
+
+        @Override
+        protected void onScrollChanged(int l, int t, int oldl, int oldt) {
+            super.onScrollChanged(l, t, oldl, oldt);
+            if (onScroll != null) onScroll.run();
+        }
 
         CenteringScroller(Context c) {
             super(c);
@@ -202,7 +213,7 @@ public class StartActivity extends Activity implements Media.Listener {
         }
     }
 
-    /** A round status-bar button holding one glyph; fills in when focused. */
+    /** A status-bar button holding one glyph; focused, it gets a rounded box with a white outline. */
     class StatusButton extends View {
         int glyph, level;
         final String name;
@@ -229,10 +240,14 @@ public class StartActivity extends Activity implements Media.Listener {
             boolean light = prefs.getInt("bg", BG_BLACK) == BG_WHITE;
             int fg = light ? 0xFF1D1D1D : Color.WHITE;
             if (isFocused()) {
+                float o = dp(1);
                 p.setStyle(Paint.Style.FILL);
+                p.setColor(light ? 0x1F000000 : 0x40FFFFFF);
+                c.drawRoundRect(o, o, getWidth() - o, getHeight() - o, dp(5), dp(5), p);
+                p.setStyle(Paint.Style.STROKE);
+                p.setStrokeWidth(dp(2));
                 p.setColor(fg);
-                c.drawCircle(cx, cy, getWidth() / 2f, p);
-                fg = light ? Color.WHITE : 0xFF1D1D1D;
+                c.drawRoundRect(o, o, getWidth() - o, getHeight() - o, dp(5), dp(5), p);
             }
             p.setColor(fg);
             Glyphs.draw(c, glyph, cx, cy, getWidth() * .46f, p, dp(1.8f), level);
@@ -249,7 +264,14 @@ public class StartActivity extends Activity implements Media.Listener {
     FrameLayout root, flyoutLayer;
     LinearLayout content;
     ImageView bgImage;
-    TextView startButton, clock, date, statusHint;
+    TextView startButton, clock, date, statusHint, greeting, bingTitle, bingCredit;
+    LinearLayout bingCaption;
+    View pageDots;
+    StatusButton inputsButton;
+    /** What Back does while a flyout is open; null closes it. Sub-pages use it to return to Personalize. */
+    Runnable flyoutBack;
+    int ticks;
+    String bingShown;
     StatusButton wifiButton;
     CenteringScroller scroller;
     TileGrid grid;
@@ -334,7 +356,9 @@ public class StartActivity extends Activity implements Media.Listener {
         refreshRecentsAsync();
         h.post(ticker);
         h.postDelayed(flipper, 2500);
-        if (bgImage.getDrawable() == null && prefs.getInt("bg", BG_BLACK) == BG_IMAGE) applyBackground();
+        if (bgImage.getDrawable() == null && isPhoto(prefs.getInt("bg", BG_BLACK))) applyBackground();
+        ticks = 0;
+        Updater.autoCheck(this, v -> toast("Metro " + v + " is available: Personalize › About"));
     }
 
     @Override
@@ -371,7 +395,10 @@ public class StartActivity extends Activity implements Media.Listener {
     }
 
     @Override
-    public void onBackPressed() { closeFlyout(); }
+    public void onBackPressed() {
+        if (flyoutOpen && flyoutBack != null) flyoutBack.run();
+        else closeFlyout();
+    }
 
     @Override
     public boolean onKeyDown(int code, KeyEvent e) {
@@ -380,9 +407,17 @@ public class StartActivity extends Activity implements Media.Listener {
             voiceSearch();
             return true;
         }
+        // The remote's Input / Source button, when the TV lets it through to Home.
+        if (code == KeyEvent.KEYCODE_TV_INPUT && inputsButton != null && inputsButton.getVisibility() == View.VISIBLE) {
+            showInputs();
+            return true;
+        }
         if (code == KeyEvent.KEYCODE_MENU && flyoutOpen) {
             View f = getCurrentFocus();
             if (f != null && f.getTag() instanceof App) appMenu((App) f.getTag());
+            else if (f != null && f.getTag() instanceof String && ((String) f.getTag()).startsWith(INPUT_PREFIX)) {
+                inputMenu(((String) f.getTag()).substring(INPUT_PREFIX.length()));
+            }
             return true;
         }
         if (code == KeyEvent.KEYCODE_MENU && !flyoutOpen) {
@@ -400,6 +435,13 @@ public class StartActivity extends Activity implements Media.Listener {
             refreshStats();
             refreshProgress();
             refreshNetwork();
+            updateGreeting();
+            // Once a minute: the next Bing image, and the online refreshes (each checks its own age).
+            if (ticks++ % 30 == 0) {
+                bingTick();
+                Weather.refresh(StartActivity.this, StartActivity.this::updateGreeting);
+                if (prefs.getInt("bg", BG_BLACK) == BG_BING) Bing.refresh(StartActivity.this, StartActivity.this::bingTick);
+            }
             h.postDelayed(this, 2000);
         }
     };
@@ -430,7 +472,27 @@ public class StartActivity extends Activity implements Media.Listener {
         content.setClipChildren(false);
         root.addView(content, match());
 
-        FrameLayout header = new FrameLayout(this);
+        FrameLayout header = new FrameLayout(this) {
+            // The greeting hangs below the header without making it taller, so Start's tiles don't move down.
+            @Override protected void onMeasure(int ws, int hs) {
+                super.onMeasure(ws, hs);
+                int bottom = 0;
+                for (int i = 0; i < getChildCount(); i++) {
+                    View c = getChildAt(i);
+                    if (c == greeting || c == statusHint || c.getVisibility() == View.GONE) continue;
+                    FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) c.getLayoutParams();
+                    bottom = Math.max(bottom, lp.topMargin + c.getMeasuredHeight() + lp.bottomMargin);
+                }
+                setMeasuredDimension(getMeasuredWidth(), bottom + getPaddingTop() + getPaddingBottom());
+            }
+
+            // The clock shares a baseline with "Start" and the date with the greeting, like a two-line
+            // heading across the screen. Only the text shifts, so the header (and the grid) keep their place.
+            @Override protected void onLayout(boolean changed, int l, int t, int r, int b) {
+                super.onLayout(changed, l, t, r, b);
+                alignClock();
+            }
+        };
         header.setPadding(dp(42), dp(24), dp(52), 0);
         header.setClipChildren(false);
         // The Start button's glow spills into the padding; clipping it there would draw a box edge.
@@ -444,19 +506,28 @@ public class StartActivity extends Activity implements Media.Listener {
         startButton.setOnFocusChangeListener((v, f) -> styleStart());
         if (Build.VERSION.SDK_INT >= 26) startButton.setDefaultFocusHighlightEnabled(false);
         header.addView(startButton, new FrameLayout.LayoutParams(-2, -2, Gravity.START | Gravity.TOP));
+        greeting = text("", 13.5f, Fonts.REG);
+        greeting.setVisibility(View.GONE);
+        FrameLayout.LayoutParams glp = new FrameLayout.LayoutParams(-2, -2, Gravity.START | Gravity.TOP);
+        glp.leftMargin = dp(11);
+        glp.topMargin = dp(52);
+        header.addView(greeting, glp);
 
         LinearLayout right = new LinearLayout(this);
         right.setOrientation(LinearLayout.HORIZONTAL);
         right.setGravity(Gravity.CENTER_VERTICAL);
         right.setClipChildren(false);
         StatusButton voice = new StatusButton(Glyphs.MIC, "Voice search", v -> voiceSearch());
+        inputsButton = new StatusButton(Glyphs.HDMI, "Inputs", v -> showInputs());
+        // Streaming boxes have no HDMI-in or tuner: then there's nothing to switch to.
+        inputsButton.setVisibility(passthroughInputs().isEmpty() && liveTvPackage() == null ? View.GONE : View.VISIBLE);
         StatusButton personalize = new StatusButton(Glyphs.PERSONALIZE, "Personalize", v -> showSettings());
         StatusButton recent = new StatusButton(Glyphs.RECENT, "Recent apps", v -> showRecents());
         StatusButton settings = new StatusButton(Glyphs.SETTINGS, "Settings", v -> startSafe(new Intent(Settings.ACTION_SETTINGS)));
         wifiButton = new StatusButton(Glyphs.WIFI, "Network", v -> startSafe(new Intent(Settings.ACTION_WIFI_SETTINGS)));
-        for (View v : new View[]{voice, personalize, recent, settings, wifiButton}) {
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(38), dp(38));
-            lp.leftMargin = dp(6);
+        for (View v : new View[]{voice, inputsButton, personalize, recent, settings, wifiButton}) {
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(40), dp(40));
+            lp.leftMargin = dp(8);
             right.addView(v, lp);
         }
         LinearLayout time = new LinearLayout(this);
@@ -483,12 +554,55 @@ public class StartActivity extends Activity implements Media.Listener {
         scroller.setOverScrollMode(View.OVER_SCROLL_NEVER);
         scroller.setClipChildren(false);
         scroller.setSmoothScrollingEnabled(true);
-        grid = new TileGrid(this, 2, 160, 160, 14);
+        grid = new TileGrid(this, 2, 160, 160, 10.5f);
         grid.setPadding(dp(52), dp(26), dp(52), dp(26));
         scroller.addView(grid, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER_VERTICAL));
         LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-1, 0, 1);
         slp.bottomMargin = dp(14);
         content.addView(scroller, slp);
+
+        // Bing's description and credit: an overlay, so the tile grid keeps its size.
+        bingCaption = new LinearLayout(this);
+        bingCaption.setOrientation(LinearLayout.VERTICAL);
+        bingTitle = text("", 13, Fonts.MED);
+        bingCredit = text("", 11, Fonts.REG);
+        bingCredit.setTextColor(0xD9FFFFFF);
+        bingCredit.setPadding(0, dp(4), 0, 0);
+        for (TextView t : new TextView[]{bingTitle, bingCredit}) {
+            t.setShadowLayer(dp(3), 0, dp(1), 0xCC000000);
+            t.setSingleLine(true);
+            t.setEllipsize(TextUtils.TruncateAt.END);
+            bingCaption.addView(t);
+        }
+        bingCaption.setVisibility(View.GONE);
+        FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.START);
+        clp.setMargins(dp(62), 0, dp(200), dp(16));
+        root.addView(bingCaption, clp);
+        // Where you are on Start: one dash per screenful of tiles, the current one long. It follows the
+        // scrolling, so the long dash slides from one page to the next as the tiles glide.
+        pageDots = new View(this) {
+            final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+            @Override protected void onDraw(Canvas c) {
+                int view = scroller.getWidth(), full = grid.getWidth(), max = full - view;
+                if (view == 0 || max <= dp(8)) return;
+                int pages = (int) Math.ceil(full / (float) view);
+                float at = scroller.getScrollX() / (float) max * (pages - 1);
+                float x = getWidth(), y = getHeight() / 2f, hh = dp(3);
+                for (int i = pages - 1; i >= 0; i--) {
+                    float near = Math.max(0, 1 - Math.abs(i - at));
+                    float w = dp(10) + dp(16) * near;
+                    p.setColor(Color.WHITE);
+                    p.setAlpha(Math.round(140 + 115 * near));
+                    c.drawRoundRect(x - w, y - hh / 2, x, y + hh / 2, hh / 2, hh / 2, p);
+                    x -= w + dp(6);
+                }
+            }
+        };
+        FrameLayout.LayoutParams dlp = new FrameLayout.LayoutParams(dp(170), dp(12), Gravity.BOTTOM | Gravity.END);
+        dlp.setMargins(0, 0, dp(62), dp(22));
+        root.addView(pageDots, dlp);
+        scroller.onScroll = pageDots::invalidate;
+        scroller.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, orr, ob) -> pageDots.invalidate());
 
         splash = new FrameLayout(this);
         splash.setVisibility(View.GONE);
@@ -717,7 +831,9 @@ public class StartActivity extends Activity implements Media.Listener {
         List<String> out = new ArrayList<>();
         String saved = prefs.getString("pins", null);
         if (saved != null) {
-            for (String k : saved.split(",")) if ((apps.containsKey(k) || k.equals(SYS_SYSTEM)) && !out.contains(k)) out.add(k);
+            for (String k : saved.split(",")) {
+                if ((apps.containsKey(k) || k.equals(SYS_SYSTEM) || k.startsWith(INPUT_PREFIX)) && !out.contains(k)) out.add(k);
+            }
             return out;
         }
         for (String want : DEFAULT_PINS) {
@@ -771,6 +887,66 @@ public class StartActivity extends Activity implements Media.Listener {
         return size == 3 ? new TileGrid.LP(2, 2) : new TileGrid.LP(size == 2 ? 2 : 1, 1);
     }
 
+    static final String INPUT_PREFIX = "input:";
+    /** After a tile changes size it keeps its place and the others make room. */
+    String layoutFirst;
+
+    /**
+     * Start's grid as saved, brought up to date: pinned tiles without a place yet go into the first gap,
+     * unpinned ones are dropped, and sizes are applied. The first time (or after a reset) tiles are placed
+     * the original Windows 8 way, so an existing Start looks the same.
+     */
+    Layout layout() {
+        List<String> pins = pins();
+        Layout l = new Layout(grid.rows);
+        String saved = prefs.getString("pos", null);
+        if (saved == null) {
+            int n = pins.size();
+            int[] w = new int[n], hh = new int[n];
+            for (int i = 0; i < n; i++) {
+                TileGrid.LP lp = sizeLp(tileSize(pins.get(i)));
+                w[i] = lp.w;
+                hh[i] = lp.h;
+            }
+            int[][] at = TileGrid.pack(w, hh, grid.rows);
+            for (int i = 0; i < n; i++) l.tiles.add(new Layout.Tile(pins.get(i), at[i][0], at[i][1], w[i], hh[i]));
+        } else {
+            Map<String, int[]> pos = new HashMap<>();
+            for (String e : saved.split(",")) {
+                // Keys can contain ':' themselves (input tiles), so read the numbers from the end.
+                int b = e.lastIndexOf(':'), a = b > 0 ? e.lastIndexOf(':', b - 1) : -1;
+                if (a <= 0) continue;
+                try { pos.put(e.substring(0, a), new int[]{Integer.parseInt(e.substring(a + 1, b)), Integer.parseInt(e.substring(b + 1))}); }
+                catch (NumberFormatException ignored) { }
+            }
+            List<String> later = new ArrayList<>();
+            for (String k : pins) {
+                TileGrid.LP lp = sizeLp(tileSize(k));
+                int[] p = pos.get(k);
+                if (p != null) l.tiles.add(new Layout.Tile(k, p[0], p[1], lp.w, lp.h));
+                else later.add(k);
+            }
+            l.repair(layoutFirst);
+            for (String k : later) { TileGrid.LP lp = sizeLp(tileSize(k)); l.add(k, lp.w, lp.h); }
+        }
+        layoutFirst = null;
+        l.compact();
+        return l;
+    }
+
+    /** Saves tile places, keeping those of pinned apps that aren't installed right now. */
+    void saveLayout(Layout l) {
+        StringBuilder out = new StringBuilder(l.save());
+        String pinsRaw = "," + prefs.getString("pins", "") + ",";
+        for (String e : prefs.getString("pos", "").split(",")) {
+            int b = e.lastIndexOf(':'), a = b > 0 ? e.lastIndexOf(':', b - 1) : -1;
+            if (a <= 0) continue;
+            String k = e.substring(0, a);
+            if (l.find(k) == null && pinsRaw.contains("," + k + ",") && !apps.containsKey(k)) out.append(out.length() > 0 ? "," : "").append(e);
+        }
+        prefs.edit().putString("pos", out.toString()).apply();
+    }
+
     void buildTiles() {
         View cur = getCurrentFocus();
         if (cur instanceof TileView) focusKey = key((TileView) cur);
@@ -778,9 +954,20 @@ public class StartActivity extends Activity implements Media.Listener {
         tiles.clear();
         systemTile = null;
 
-        for (String k : pins()) {
+        Layout lay = layout();
+        saveLayout(lay);
+        for (Layout.Tile cell : lay.ordered()) {
+            String k = cell.key;
             TileView t = new TileView(this);
-            if (k.equals(SYS_SYSTEM)) {
+            if (k.startsWith(INPUT_PREFIX)) {
+                final String id = k.substring(INPUT_PREFIX.length());
+                t.tag2 = k;
+                t.label = inputName(id);
+                t.sysGlyph = Glyphs.HDMI;
+                for (android.media.tv.TvInputInfo info : passthroughInputs()) if (info.getId().equals(id) && isAv(info)) t.sysGlyph = Glyphs.AV;
+                t.setColor(tileColor(k, 0xFF0063B1));
+                t.setOnClickListener(v -> openInput(id));
+            } else if (k.equals(SYS_SYSTEM)) {
                 t.tag2 = k;
                 t.label = "System";
                 t.sysGlyph = Glyphs.MEMORY;
@@ -799,7 +986,10 @@ public class StartActivity extends Activity implements Media.Listener {
             }
             t.setOnLongClickListener(v -> { tileMenu((TileView) v); return true; });
             t.setOnFocusChangeListener((v, f) -> { if (f) focusKey = key((TileView) v); });
-            grid.addView(t, sizeLp(tileSize(k)));
+            TileGrid.LP lp = sizeLp(tileSize(k));
+            lp.col = cell.c;
+            lp.row = cell.r;
+            grid.addView(t, lp);
             tiles.add(t);
         }
         applyBackgroundColors();
@@ -1315,25 +1505,32 @@ public class StartActivity extends Activity implements Media.Listener {
     LinearLayout openFlyout(String heading) {
         flyoutLayer.animate().cancel();
         flyoutLayer.removeAllViews();
-        flyoutLayer.setBackgroundColor(0x66000000);
+        flyoutLayer.setBackgroundColor(0x80000000);
+        dropdown = false;
         ScrollView sv = new ScrollView(this);
-        sv.setBackgroundColor(0xFF1D1D1D);
+        // A dark panel with a hairline down its left edge.
+        android.graphics.drawable.LayerDrawable panel = new android.graphics.drawable.LayerDrawable(new android.graphics.drawable.Drawable[]{
+                new ColorDrawable(PANEL), new ColorDrawable(0xFF33383E)});
+        panel.setLayerInset(1, 0, 0, flyoutWidth() - Math.max(1, dp(1)), 0);
+        sv.setBackground(panel);
+        flyoutBack = null;
         sv.setOnClickListener(v -> { });
         sv.setVerticalScrollBarEnabled(false);
         LinearLayout body = new LinearLayout(this);
         body.setOrientation(LinearLayout.VERTICAL);
-        body.setPadding(dp(26), dp(30), dp(26), dp(30));
-        TextView t = text(heading, 24, Fonts.REG);
-        t.setPadding(dp(10), 0, 0, dp(16));
+        body.setPadding(dp(26), dp(28), dp(26), dp(30));
+        TextView t = text(heading, 30, Fonts.REG);
+        t.setTextColor(Color.WHITE);
+        t.setPadding(0, 0, 0, dp(18));
         body.addView(t);
         sv.addView(body);
-        flyoutLayer.addView(sv, new FrameLayout.LayoutParams(dp(370), -1, Gravity.END));
+        flyoutLayer.addView(sv, new FrameLayout.LayoutParams(flyoutWidth(), -1, Gravity.END));
         content.setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
         flyoutLayer.setVisibility(View.VISIBLE);
         flyoutOpen = true;
         flyoutLayer.setAlpha(0);
         flyoutLayer.animate().alpha(1).setDuration(150).start();
-        sv.setTranslationX(dp(370));
+        sv.setTranslationX(flyoutWidth());
         sv.animate().translationX(0).setDuration(300).setInterpolator(new DecelerateInterpolator(2.5f)).start();
         flyoutBody = body;
         return body;
@@ -1353,7 +1550,8 @@ public class StartActivity extends Activity implements Media.Listener {
         if (!flyoutOpen) return false;
         flyoutOpen = false;
         View panel = flyoutLayer.getChildAt(0);
-        panel.animate().translationX(dp(370)).setDuration(200).setInterpolator(new AccelerateInterpolator()).start();
+        if (dropdown) panel.animate().alpha(0).translationY(-dp(8)).setDuration(150).start();
+        else panel.animate().translationX(flyoutWidth()).setDuration(200).setInterpolator(new AccelerateInterpolator()).start();
         flyoutLayer.animate().alpha(0).setDuration(200).withEndAction(() -> {
             if (flyoutOpen) return; // a new flyout opened meanwhile
             flyoutLayer.setVisibility(View.GONE);
@@ -1367,6 +1565,211 @@ public class StartActivity extends Activity implements Media.Listener {
         return true;
     }
 
+    int flyoutWidth() { return dp(400); }
+
+    /** Menu colours: the panel, a card row, and a focused card. */
+    static final int PANEL = 0xFF1F2226, CARD = 0xFF282C31, CARD_FOCUS = 0xFF3B4046;
+    /** True while the open menu is a drop-down (Inputs) rather than a side panel. */
+    boolean dropdown;
+
+    int accentColor() { return accent() == APP_COLOURS ? PALETTE[0] : accent(); }
+
+    static final int TRAIL_NONE = 0, TRAIL_CHECK = 1, TRAIL_SWITCH = 2, TRAIL_VALUE = 3, TRAIL_NAV = 4, TRAIL_CYCLE = 5, TRAIL_FIELD = 6;
+
+    /** A choice that steps through its values with Left/Right (and OK, forwards). */
+    interface Step { void step(Row r, int dir); }
+
+    /**
+     * A Fluent-style menu row: optional icon, a label and subtitle, and at the right edge a check, an
+     * on/off switch or a value. Switches and values change in place, without rebuilding the menu.
+     */
+    class Row extends LinearLayout {
+        final TextView title, subtitle;
+        final int trail;
+        TextView value;
+        boolean on;
+        float knob;
+        ValueAnimator knobAnim;
+        final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        final RectF r = new RectF();
+        final android.graphics.Path path = new android.graphics.Path();
+        Step step;
+
+        Row(View icon, String label, String sub, int trail) {
+            super(StartActivity.this);
+            this.trail = trail;
+            setOrientation(HORIZONTAL);
+            setGravity(Gravity.CENTER_VERTICAL);
+            setPadding(dp(18), dp(13), dp(18), dp(13));
+            setMinimumHeight(dp(52));
+            setFocusable(true);
+            setClickable(true);
+            setBackground(focusBg());
+            setWillNotDraw(false);
+            if (icon != null) {
+                LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(dp(30), dp(30));
+                ilp.rightMargin = dp(14);
+                addView(icon, ilp);
+            }
+            LinearLayout txt = new LinearLayout(StartActivity.this);
+            txt.setOrientation(VERTICAL);
+            title = text(label, 15.5f, Fonts.REG);
+            txt.addView(title);
+            subtitle = text(sub == null ? "" : sub, 11.5f, Fonts.REG);
+            subtitle.setTextColor(0xFFAEB4BA);
+            subtitle.setPadding(0, dp(4), 0, 0);
+            subtitle.setLineSpacing(dp(1.5f), 1);
+            subtitle.setVisibility(sub == null ? GONE : VISIBLE);
+            txt.addView(subtitle);
+            addView(txt, new LinearLayout.LayoutParams(0, -2, 1));
+            if (trail == TRAIL_VALUE || trail == TRAIL_CYCLE || trail == TRAIL_FIELD) {
+                value = text("", trail == TRAIL_CYCLE ? 15 : 14, Fonts.REG);
+                value.setTextColor(trail == TRAIL_CYCLE ? Color.WHITE : 0xFFD2D6DA);
+                value.setSingleLine(true);
+                value.setEllipsize(TextUtils.TruncateAt.END);
+                LinearLayout.LayoutParams vlp = new LinearLayout.LayoutParams(trail == TRAIL_FIELD ? dp(170) : -2, -2);
+                vlp.leftMargin = dp(14);
+                if (trail == TRAIL_FIELD) {
+                    // Looks like a text box; selecting the row opens the keyboard.
+                    android.graphics.drawable.GradientDrawable box = new android.graphics.drawable.GradientDrawable();
+                    box.setColor(0xFF15181B);
+                    box.setStroke(dp(1), 0xFF5E646B);
+                    box.setCornerRadius(dp(2));
+                    value.setBackground(box);
+                    value.setPadding(dp(12), dp(9), dp(12), dp(9));
+                }
+                addView(value, vlp);
+            } else if (trail != TRAIL_NONE) {
+                // Room for what's drawn at the right edge.
+                LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(dp(trail == TRAIL_SWITCH ? 40 : trail == TRAIL_NAV ? 10 : 18), dp(20));
+                slp.leftMargin = dp(14);
+                addView(new View(StartActivity.this), slp);
+            }
+        }
+
+        Row sub(String s) {
+            subtitle.setText(s == null ? "" : s);
+            subtitle.setVisibility(s == null ? GONE : VISIBLE);
+            return this;
+        }
+
+        Row value(String s) {
+            if (value != null) value.setText(trail == TRAIL_CYCLE ? "‹  " + s + "  ›" : s);
+            return this;
+        }
+
+        /** A field row's placeholder, shown dimmer when there's no value yet. */
+        Row field(String v, String placeholder) {
+            boolean empty = v == null || v.isEmpty();
+            value.setText(empty ? placeholder : v);
+            value.setTextColor(empty ? 0xFF7D838A : Color.WHITE);
+            return this;
+        }
+
+        @Override
+        public boolean onKeyDown(int code, KeyEvent e) {
+            if (step != null && (code == KeyEvent.KEYCODE_DPAD_LEFT || code == KeyEvent.KEYCODE_DPAD_RIGHT)) {
+                step.step(this, code == KeyEvent.KEYCODE_DPAD_LEFT ? -1 : 1);
+                return true;
+            }
+            return super.onKeyDown(code, e);
+        }
+
+        /** Ticks a check row (and marks it as the selected choice), or flips a switch. */
+        Row on(boolean v, boolean animate) {
+            on = v;
+            if (trail == TRAIL_CHECK) setSelected(v);
+            if (knobAnim != null) knobAnim.cancel();
+            if (animate && trail == TRAIL_SWITCH) {
+                knobAnim = ValueAnimator.ofFloat(knob, v ? 1 : 0).setDuration(140);
+                knobAnim.addUpdateListener(a -> { knob = (float) a.getAnimatedValue(); invalidate(); });
+                knobAnim.start();
+            } else {
+                knob = v ? 1 : 0;
+                invalidate();
+            }
+            return this;
+        }
+
+        @Override
+        protected void dispatchDraw(Canvas c) {
+            super.dispatchDraw(c);
+            int hh = getHeight(), right = getWidth() - getPaddingRight();
+            float cy = hh / 2f;
+            p.setStyle(Paint.Style.FILL);
+            // The selected choice gets the accent: a short bar at the left edge, as in Windows 11.
+            if (isSelected()) {
+                p.setColor(accentColor());
+                r.set(dp(3), hh * .3f, dp(6), hh * .7f);
+                c.drawRoundRect(r, dp(1.5f), dp(1.5f), p);
+            }
+            if (trail == TRAIL_CHECK && on) {
+                p.setStyle(Paint.Style.STROKE);
+                p.setStrokeWidth(dp(2));
+                p.setStrokeCap(Paint.Cap.ROUND);
+                p.setStrokeJoin(Paint.Join.ROUND);
+                p.setColor(Color.WHITE);
+                path.reset();
+                path.moveTo(right - dp(16), cy);
+                path.lineTo(right - dp(10.5f), cy + dp(5));
+                path.lineTo(right - dp(1), cy - dp(5.5f));
+                c.drawPath(path, p);
+            } else if (trail == TRAIL_NAV) {
+                p.setStyle(Paint.Style.STROKE);
+                p.setStrokeWidth(dp(1.8f));
+                p.setStrokeCap(Paint.Cap.ROUND);
+                p.setStrokeJoin(Paint.Join.ROUND);
+                p.setColor(0xFFD2D6DA);
+                path.reset();
+                path.moveTo(right - dp(7), cy - dp(6));
+                path.lineTo(right - dp(1), cy);
+                path.lineTo(right - dp(7), cy + dp(6));
+                c.drawPath(path, p);
+            } else if (trail == TRAIL_SWITCH) {
+                r.set(right - dp(40), cy - dp(10), right, cy + dp(10));
+                int acc = accentColor();
+                if (knob > 0) {
+                    p.setColor(acc);
+                    p.setAlpha(Math.round(255 * knob));
+                    c.drawRoundRect(r, dp(10), dp(10), p);
+                    p.setAlpha(255);
+                }
+                if (knob < 1) {
+                    p.setStyle(Paint.Style.STROKE);
+                    p.setStrokeWidth(dp(1.5f));
+                    p.setColor(0xFFC8C8C8);
+                    p.setAlpha(Math.round(255 * (1 - knob)));
+                    r.inset(dp(.75f), dp(.75f));
+                    c.drawRoundRect(r, dp(10), dp(10), p);
+                    r.inset(-dp(.75f), -dp(.75f));
+                    p.setAlpha(255);
+                    p.setStyle(Paint.Style.FILL);
+                }
+                float kx = r.left + dp(10) + (r.width() - dp(20)) * knob;
+                p.setColor(knob > .5f ? Color.WHITE : 0xFFC8C8C8);
+                c.drawCircle(kx, cy, dp(5) + dp(1) * knob, p);
+            }
+        }
+    }
+
+    /** Adds a row; {@code tag} lets a rebuilt menu put focus back on the same row. */
+    Row row(LinearLayout parent, String tag, View icon, String label, String sub, int trail, View.OnClickListener click) {
+        Row r = new Row(icon, label, sub, trail);
+        r.setTag(tag);
+        r.setOnClickListener(click);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.bottomMargin = dp(2);
+        parent.addView(r, lp);
+        return r;
+    }
+
+    /** A row whose value steps with Left/Right, or forwards with OK. */
+    Row cycle(LinearLayout parent, String tag, String label, String sub, Step step) {
+        Row r = row(parent, tag, null, label, sub, TRAIL_CYCLE, v -> step.step((Row) v, 1));
+        r.step = step;
+        return r;
+    }
+
     View item(LinearLayout parent, Bitmap icon, String label, String sub, View.OnClickListener click) {
         ImageView iv = null;
         if (icon != null) {
@@ -1377,48 +1780,42 @@ public class StartActivity extends Activity implements Media.Listener {
     }
 
     View itemWith(LinearLayout parent, View icon, String label, String sub, View.OnClickListener click) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(10), dp(9), dp(10), dp(9));
-        row.setFocusable(true);
-        row.setClickable(true);
-        row.setBackground(focusBg());
-        if (icon != null) {
-            LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(dp(30), dp(30));
-            ilp.rightMargin = dp(14);
-            row.addView(icon, ilp);
-        }
-        LinearLayout txt = new LinearLayout(this);
-        txt.setOrientation(LinearLayout.VERTICAL);
-        txt.addView(text(label, 15.5f, Fonts.REG));
-        if (sub != null) {
-            TextView s = text(sub, 11.5f, Fonts.REG);
-            s.setTextColor(0xFFA8A8A8);
-            s.setPadding(0, dp(4), 0, 0);
-            txt.addView(s);
-        }
-        row.addView(txt, new LinearLayout.LayoutParams(0, -2, 1));
-        row.setOnClickListener(click);
-        parent.addView(row, new LinearLayout.LayoutParams(-1, -2));
-        return row;
+        return row(parent, null, icon, label, sub, TRAIL_NONE, click);
     }
 
     void caption(LinearLayout parent, String s) {
-        TextView t = text(s.toUpperCase(), 10.5f, Fonts.MED);
-        t.setTextColor(0xFF9A9A9A);
-        t.setLetterSpacing(0.06f);
-        t.setPadding(dp(10), dp(18), 0, dp(8));
+        TextView t = text(s.toUpperCase(), 11.5f, Fonts.MED);
+        t.setTextColor(0xFF9EA4AA);
+        t.setLetterSpacing(0.1f);
+        t.setPadding(dp(2), dp(20), 0, dp(10));
         parent.addView(t);
     }
 
+    /** Body text in a menu: hints, release notes. */
+    TextView note(LinearLayout parent, String s) {
+        TextView t = text(s, 12.5f, Fonts.REG);
+        t.setTextColor(0xFFB4BAC0);
+        t.setPadding(dp(2), dp(2), dp(2), dp(10));
+        t.setLineSpacing(dp(2.5f), 1);
+        parent.addView(t);
+        return t;
+    }
+
+    /** Card rows: a dark card, lighter with a 2dp white outline when focused. The accent marks the selected choice. */
     android.graphics.drawable.StateListDrawable focusBg() {
         android.graphics.drawable.StateListDrawable s = new android.graphics.drawable.StateListDrawable();
-        int acc = accent() == APP_COLOURS ? PALETTE[0] : accent();
-        s.addState(new int[]{android.R.attr.state_pressed}, new ColorDrawable(0xFF555555));
-        s.addState(new int[]{android.R.attr.state_focused}, new ColorDrawable(acc));
-        s.addState(new int[]{}, new ColorDrawable(0));
+        s.addState(new int[]{android.R.attr.state_pressed}, card(0xFF484D54, true));
+        s.addState(new int[]{android.R.attr.state_focused}, card(CARD_FOCUS, true));
+        s.addState(new int[]{}, card(CARD, false));
         return s;
+    }
+
+    android.graphics.drawable.GradientDrawable card(int fill, boolean outline) {
+        android.graphics.drawable.GradientDrawable g = new android.graphics.drawable.GradientDrawable();
+        g.setColor(fill);
+        if (outline) g.setStroke(dp(2), Color.WHITE);
+        g.setCornerRadius(dp(2));
+        return g;
     }
 
     interface ColorPick { void pick(int c); }
@@ -1429,6 +1826,7 @@ public class StartActivity extends Activity implements Media.Listener {
         for (int i = 0; i < colors.length; i++) {
             if (i % 5 == 0) {
                 row = new LinearLayout(this);
+                row.setPadding(dp(8), 0, 0, 0);
                 parent.addView(row);
             }
             final int c = colors[i];
@@ -1436,7 +1834,13 @@ public class StartActivity extends Activity implements Media.Listener {
                 final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
                 @Override protected void onDraw(Canvas cv) {
                     int w = getWidth(), hh = getHeight(), in = dp(5);
-                    if (isFocused()) { p.setColor(Color.WHITE); cv.drawRect(0, 0, w, hh, p); }
+                    if (isFocused()) {
+                        p.setStyle(Paint.Style.STROKE);
+                        p.setStrokeWidth(dp(2));
+                        p.setColor(Color.WHITE);
+                        cv.drawRect(dp(1), dp(1), w - dp(1), hh - dp(1), p);
+                        p.setStyle(Paint.Style.FILL);
+                    }
                     if (c == APP_COLOURS) {
                         int[] q = {0xFFE51400, 0xFF1BA1E2, 0xFF60A917, 0xFFF09609};
                         for (int k = 0; k < 4; k++) {
@@ -1455,35 +1859,396 @@ public class StartActivity extends Activity implements Media.Listener {
             };
             sw.setFocusable(true);
             sw.setClickable(true);
+            sw.setTag("sw" + c);
             sw.setOnFocusChangeListener((v, f) -> v.invalidate());
             sw.setOnClickListener(v -> pick.pick(c));
-            row.addView(sw, new LinearLayout.LayoutParams(dp(60), dp(54)));
+            row.addView(sw, new LinearLayout.LayoutParams(dp(66), dp(56)));
         }
     }
 
-    // ---------------------------------------------------------------- settings
+    // ---------------------------------------------------------------- Personalize
 
-    void showSettings() {
+    static final String[] TABS = {"Background", "Tiles", "Start", "About"};
+    static final int TAB_BACKGROUND = 0, TAB_TILES = 1, TAB_START = 2, TAB_ABOUT = 3;
+    static final String ONLINE = "Uses the internet";
+    int settingsTab;
+    LinearLayout tabBody;
+    TextView[] tabViews;
+
+    void showSettings() { showSettings(settingsTab, null); }
+
+    /** Personalize: tabs along the top; moving between them rebuilds only the area below. */
+    void showSettings(int tab, String focusTag) {
         LinearLayout b = openFlyout("Personalize");
-        caption(b, "Background");
-        int bg = prefs.getInt("bg", BG_BLACK);
-        item(b, null, "Black" + (bg == BG_BLACK ? "  ✓" : ""), null, v -> setBg(BG_BLACK));
-        item(b, null, "White" + (bg == BG_WHITE ? "  ✓" : ""), null, v -> setBg(BG_WHITE));
-        for (int m = BG_MIDNIGHT; m <= BG_GRAPHITE; m++) {
-            final int mode = m;
-            View sw = new View(this);
-            sw.setBackground(gradient(mode));
-            itemWith(b, sw, THEME_NAMES[mode - BG_MIDNIGHT] + (bg == mode ? "  ✓" : ""), "Dark gradient", v -> setBg(mode));
+        LinearLayout bar = new LinearLayout(this);
+        bar.setPadding(0, 0, 0, dp(4));
+        tabViews = new TextView[TABS.length];
+        for (int i = 0; i < TABS.length; i++) {
+            final int t = i;
+            TextView tv = text(TABS[i], 15, Fonts.MED);
+            tv.setPadding(dp(14), dp(9), dp(14), dp(10));
+            tv.setFocusable(true);
+            tv.setClickable(true);
+            tv.setTag("tab" + i);
+            tv.setId(View.generateViewId());
+            tv.setOnFocusChangeListener((v, f) -> { if (f && settingsTab != t) selectTab(t); });
+            tv.setOnClickListener(v -> selectTab(t));
+            tabViews[i] = tv;
+            LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(-2, -2);
+            tlp.rightMargin = dp(8);
+            bar.addView(tv, tlp);
         }
-        item(b, null, "Custom image…" + (bg == BG_IMAGE ? "  ✓" : ""), "From Pictures, Download or USB storage", v -> pickImage());
+        b.addView(bar);
+        tabBody = new LinearLayout(this);
+        tabBody.setOrientation(LinearLayout.VERTICAL);
+        b.addView(tabBody);
+        settingsTab = tab;
+        styleTabs();
+        buildTab(focusTag);
+        if (focusTag == null) h.post(() -> tabViews[settingsTab].requestFocus());
+    }
 
-        caption(b, "Tile colours");
-        TextView hint = text(accent() == APP_COLOURS ? "Each tile uses its app's own colour. Pick an accent to theme every tile, with white logos."
-                : "All tiles use this accent with white logos. The first swatch goes back to app colours.", 11.5f, Fonts.REG);
-        hint.setTextColor(0xFFA8A8A8);
-        hint.setPadding(dp(10), 0, dp(10), dp(10));
-        hint.setLineSpacing(dp(2), 1);
-        b.addView(hint);
+    void selectTab(int t) {
+        settingsTab = t;
+        styleTabs();
+        buildTab(null);
+    }
+
+    /** Pill tabs: the current one filled with the accent, the others dark; focus adds a white outline. */
+    void styleTabs() {
+        for (int i = 0; i < tabViews.length; i++) {
+            boolean cur = i == settingsTab;
+            int fill = cur ? accentColor() : 0xFF2E3338;
+            android.graphics.drawable.StateListDrawable bg = new android.graphics.drawable.StateListDrawable();
+            android.graphics.drawable.GradientDrawable f = card(fill, true), n = card(fill, false);
+            bg.addState(new int[]{android.R.attr.state_focused}, f);
+            bg.addState(new int[]{}, n);
+            tabViews[i].setBackground(bg);
+            tabViews[i].setTextColor(cur ? Color.WHITE : 0xFFD2D6DA);
+        }
+    }
+
+    /** Rebuilds the current tab, keeping focus on the row with {@code focusTag} if there is one. */
+    void buildTab(String focusTag) {
+        if (tabBody == null) return;
+        tabBody.removeAllViews();
+        switch (settingsTab) {
+            case TAB_BACKGROUND: backgroundTab(tabBody); break;
+            case TAB_TILES: tilesTab(tabBody); break;
+            case TAB_START: startTab(tabBody); break;
+            default: aboutTab(tabBody); break;
+        }
+        if (focusTag != null) h.post(() -> {
+            View v = tabBody.findViewWithTag(focusTag);
+            if (v == null) v = tabViews[settingsTab];
+            v.requestFocus();
+        });
+        tabBody.post(this::linkTopRowToTab);
+    }
+
+    /**
+     * Up from the top of a tab goes back to that tab. Left to geometry, Android picks whichever tab sits
+     * nearest above the item, which switched tabs (Background → Start) by surprise.
+     */
+    void linkTopRowToTab() {
+        if (tabBody == null || tabViews == null) return;
+        ArrayList<View> all = tabBody.getFocusables(View.FOCUS_DOWN);
+        int top = Integer.MAX_VALUE;
+        int[] loc = new int[2];
+        for (View v : all) { v.getLocationInWindow(loc); top = Math.min(top, loc[1]); }
+        for (View v : all) {
+            v.getLocationInWindow(loc);
+            if (loc[1] - top < dp(8)) v.setNextFocusUpId(tabViews[settingsTab].getId());
+        }
+    }
+
+    /** Rebuilds a tab that's on screen (after a download, say), keeping focus where it was. */
+    void refreshTab(int tab) {
+        if (!flyoutOpen || settingsTab != tab || tabBody == null || !tabBody.isAttachedToWindow()) return;
+        View f = getCurrentFocus();
+        Object tag = f != null && isInside(f, tabBody) ? f.getTag() : null;
+        if (f != null && !isInside(f, tabBody)) {
+            tabBody.removeAllViews();
+            buildTab(null);
+        } else buildTab(tag instanceof String ? (String) tag : null);
+    }
+
+    /** Back from a page opened out of Personalize returns to the same tab and row. */
+    void backToSettings(String focusTag) {
+        int tab = settingsTab;
+        flyoutBack = () -> { closeFlyout(); showSettings(tab, focusTag); };
+    }
+
+    String needsInternet() { return Net.allowed(this) ? ONLINE : ONLINE + " · turn on Internet access in Start"; }
+
+    // -------- Background tab
+
+    static final int[] WALLPAPERS = {BG_BLACK, BG_WHITE, BG_MIDNIGHT, BG_AURORA, BG_EMBER, BG_GRAPHITE, BG_BING, BG_IMAGE};
+
+    void backgroundTab(LinearLayout b) {
+        int bg = prefs.getInt("bg", BG_BLACK);
+        caption(b, "Wallpaper");
+        wallpapers(b, bg);
+        row(b, "bing", null, "Bing image of the day", needsInternet() + " · rotates the last 8 images", TRAIL_SWITCH, v -> {
+            if (prefs.getInt("bg", BG_BLACK) == BG_BING) chooseBg(prefs.getInt("bg_prev", BG_BLACK), "bing");
+            else chooseBg(BG_BING, "bing");
+        }).on(bg == BG_BING, false);
+        if (bg == BG_BING) {
+            cycle(b, "bing_every", "Change every", "How often the carousel moves on", (r, dir) -> {
+                int i = indexOf(Bing.EVERY, Bing.every(this));
+                int next = Bing.EVERY[((i < 0 ? 0 : i) + dir + Bing.EVERY.length) % Bing.EVERY.length];
+                prefs.edit().putInt("bing_every", next).apply();
+                r.value(Bing.EVERY_NAMES[indexOf(Bing.EVERY, next)]);
+                bingTick();
+            }).value(Bing.EVERY_NAMES[Math.max(0, indexOf(Bing.EVERY, Bing.every(this)))]);
+        }
+        row(b, "dream", null, "Bing screensaver", needsInternet() + " · Bing images when the TV is idle", TRAIL_SWITCH,
+                v -> toggleDream((Row) v)).on(dreamEnabled(), false);
+
+        caption(b, "Greeting and weather");
+        row(b, "greeting", null, "Greeting", greetingText().isEmpty() ? "Shows under Start" : greetingText(), TRAIL_SWITCH, v -> {
+            boolean on = !prefs.getBoolean("greeting", false);
+            prefs.edit().putBoolean("greeting", on).apply();
+            ((Row) v).on(on, true).sub(on ? greetingText() : "Shows under Start");
+            updateGreeting();
+        }).on(prefs.getBoolean("greeting", false), false);
+        row(b, "name", null, "Your name", null, TRAIL_FIELD, v -> editText("Your name", "Shown after the greeting",
+                prefs.getString("name", ""), "name", val -> {
+            prefs.edit().putString("name", val).apply();
+            updateGreeting();
+        }, null)).field(prefs.getString("name", ""), "Add your name");
+        boolean weather = prefs.getBoolean("weather", false);
+        row(b, "weather", null, "Weather", needsInternet() + " · Open-Meteo", TRAIL_SWITCH, v -> {
+            boolean on = !prefs.getBoolean("weather", false);
+            prefs.edit().putBoolean("weather", on).apply();
+            ((Row) v).on(on, true);
+            if (on) Weather.refresh(this, () -> { updateGreeting(); refreshTab(TAB_BACKGROUND); });
+            updateGreeting();
+            h.postDelayed(() -> buildTab("weather"), 160);
+        }).on(weather, false);
+        if (weather) {
+            row(b, "city", null, "City", Weather.problem(this), TRAIL_FIELD, v -> editText("City", "For example: Mumbai, London, New York",
+                    Weather.city(this), "city", val -> {
+                prefs.edit().putString("weather_city", val).apply();
+                Weather.invalidate(this);
+                Weather.refresh(this, () -> { updateGreeting(); refreshTab(TAB_BACKGROUND); });
+            }, null)).field(Weather.city(this), "Add your city");
+            cycle(b, "units", "Units", null, (r, dir) -> {
+                boolean f = !Weather.fahrenheit(this);
+                prefs.edit().putBoolean("weather_f", f).apply();
+                r.value(f ? "°F" : "°C");
+                Weather.invalidate(this);
+                Weather.refresh(this, this::updateGreeting);
+                updateGreeting();
+            }).value(Weather.fahrenheit(this) ? "°F" : "°C");
+        }
+    }
+
+    static int indexOf(int[] a, int v) {
+        for (int i = 0; i < a.length; i++) if (a[i] == v) return i;
+        return -1;
+    }
+
+    /** Wallpaper thumbnails, four to a row: a preview of each with its name; the one in use has an accent frame. */
+    void wallpapers(LinearLayout b, int current) {
+        int cols = 4, gap = dp(8), w = (flyoutWidth() - dp(52) - gap * (cols - 1)) / cols, hh = Math.round(w * 0.62f);
+        LinearLayout line = null;
+        for (int i = 0; i < WALLPAPERS.length; i++) {
+            if (i % cols == 0) {
+                line = new LinearLayout(this);
+                line.setPadding(0, 0, 0, gap);
+                b.addView(line);
+            }
+            final int mode = WALLPAPERS[i];
+            View th = new WallThumb(mode, mode == current);
+            th.setTag("wp" + mode);
+            th.setOnClickListener(v -> chooseBg(mode, "wp" + mode));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(w, hh);
+            if (i % cols != 0) lp.leftMargin = gap;
+            line.addView(th, lp);
+        }
+    }
+
+    static String wallpaperName(int mode) {
+        switch (mode) {
+            case BG_BLACK: return "Black";
+            case BG_WHITE: return "White";
+            case BG_BING: return "Bing daily";
+            case BG_IMAGE: return "Your image";
+            default: return THEME_NAMES[mode - BG_MIDNIGHT];
+        }
+    }
+
+    class WallThumb extends View {
+        final int mode;
+        final boolean selected;
+        final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        final RectF r = new RectF();
+        Bitmap preview;
+        android.graphics.drawable.Drawable fill;
+
+        WallThumb(int mode, boolean selected) {
+            super(StartActivity.this);
+            this.mode = mode;
+            this.selected = selected;
+            setFocusable(true);
+            setClickable(true);
+            if (isGradient(mode)) fill = gradient(mode);
+            else if (mode == BG_BING) {
+                Bing.Image im = Bing.current(StartActivity.this);
+                if (im != null) preview = sampled(new File(Bing.dir(StartActivity.this), im.file), 8);
+            } else if (mode == BG_IMAGE) preview = sampled(new File(getFilesDir(), "bg.jpg"), 8);
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            int w = getWidth(), hh = getHeight(), in = dp(3);
+            r.set(in, in, w - in, hh - in);
+            c.save();
+            c.clipRect(r);
+            if (preview != null) {
+                float sc = Math.max(r.width() / preview.getWidth(), r.height() / preview.getHeight());
+                float pw = preview.getWidth() * sc, ph = preview.getHeight() * sc;
+                c.drawBitmap(preview, null, new RectF(r.centerX() - pw / 2, r.centerY() - ph / 2, r.centerX() + pw / 2, r.centerY() + ph / 2), p);
+            } else if (fill != null) {
+                fill.setBounds(in, in, w - in, hh - in);
+                fill.draw(c);
+            } else {
+                p.setStyle(Paint.Style.FILL);
+                p.setColor(mode == BG_WHITE ? 0xFFF2F2F2 : mode == BG_BLACK ? Color.BLACK : mode == BG_BING ? 0xFF0B4F6C : 0xFF3A3F45);
+                c.drawRect(r, p);
+            }
+            boolean dark = mode != BG_WHITE;
+            p.setStyle(Paint.Style.FILL);
+            p.setTypeface(Fonts.MED);
+            p.setTextSize(dp(10.5f));
+            p.setColor(dark ? Color.WHITE : 0xFF1D1D1D);
+            p.setShadowLayer(dark ? dp(2) : 0, 0, dp(.5f), 0xCC000000);
+            c.drawText(wallpaperName(mode), r.left + dp(7), r.bottom - dp(7), p);
+            p.setShadowLayer(0, 0, 0, 0);
+            c.restore();
+            p.setStyle(Paint.Style.STROKE);
+            if (selected) {
+                p.setStrokeWidth(dp(3));
+                p.setColor(accentColor());
+                c.drawRect(r.left + dp(1.5f), r.top + dp(1.5f), r.right - dp(1.5f), r.bottom - dp(1.5f), p);
+            }
+            if (isFocused()) {
+                p.setStrokeWidth(dp(2));
+                p.setColor(Color.WHITE);
+                c.drawRect(dp(1), dp(1), w - dp(1), hh - dp(1), p);
+            }
+        }
+
+        @Override
+        protected void onFocusChanged(boolean f, int dir, Rect prev) {
+            super.onFocusChanged(f, dir, prev);
+            invalidate();
+        }
+    }
+
+    static Bitmap sampled(File f, int sample) {
+        if (!f.exists()) return null;
+        BitmapFactory.Options o = new BitmapFactory.Options();
+        o.inSampleSize = sample;
+        o.inPreferredConfig = Bitmap.Config.RGB_565;
+        return BitmapFactory.decodeFile(f.getPath(), o);
+    }
+
+    void chooseBg(int mode, String focusTag) {
+        if (mode == BG_IMAGE) { pickImage(); return; }
+        if (mode == BG_BING) {
+            if (!Net.allowed(this)) { toast("Turn on Internet access in Personalize › Start first"); return; }
+            if (Bing.list(this).isEmpty()) {
+                // Nothing cached yet: show it as soon as the first images arrive.
+                prefs.edit().putLong("bing_fetched", 0).apply();
+                toast("Downloading Bing images…");
+            }
+            Bing.refresh(this, () -> {
+                bingShown = null;
+                applyBackground();
+                refreshTab(TAB_BACKGROUND);
+            });
+        }
+        // Remember the last non-Bing background, for when the Bing switch is turned off again.
+        SharedPreferences.Editor e = prefs.edit().putInt("bg", mode);
+        if (mode != BG_BING) e.putInt("bg_prev", mode);
+        e.apply();
+        applyBackground();
+        buildTab(focusTag);
+    }
+
+    void setBg(int mode) {
+        prefs.edit().putInt("bg", mode).putInt("bg_prev", mode).apply();
+        applyBackground();
+        closeFlyout();
+        showSettings(TAB_BACKGROUND, "wp" + mode);
+    }
+
+    // -------- screensaver
+
+    static final String DREAMS = "screensaver_components";
+
+    boolean dreamEnabled() {
+        return getPackageManager().getComponentEnabledSetting(new ComponentName(this, BingDream.class))
+                == PackageManager.COMPONENT_ENABLED_STATE_ENABLED;
+    }
+
+    /** Granted over adb (pm grant … WRITE_SECURE_SETTINGS): lets the switch choose the screensaver itself. */
+    boolean canSetDream() {
+        return Build.VERSION.SDK_INT < 23 || checkSelfPermission("android.permission.WRITE_SECURE_SETTINGS") == PackageManager.PERMISSION_GRANTED;
+    }
+
+    /**
+     * Turns the Bing screensaver on or off. Where Metro may write the screensaver setting, it makes itself
+     * the screensaver and puts the previous one back when switched off. Otherwise Android's screensaver
+     * settings pick it; many TVs (TCL among them) don't have that screen, hence the adb grant.
+     */
+    void toggleDream(Row r) {
+        boolean on = !dreamEnabled();
+        if (on && !Net.allowed(this) && Bing.list(this).isEmpty()) {
+            toast("Turn on Internet access in Personalize › Start first");
+            return;
+        }
+        ComponentName me = new ComponentName(this, BingDream.class);
+        getPackageManager().setComponentEnabledSetting(me, on ? PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+                : PackageManager.COMPONENT_ENABLED_STATE_DISABLED, PackageManager.DONT_KILL_APP);
+        r.on(on, true);
+        String current = Settings.Secure.getString(getContentResolver(), DREAMS);
+        boolean ours = current != null && current.contains(getPackageName());
+        if (canSetDream()) {
+            try {
+                if (on && !ours) {
+                    prefs.edit().putString("dream_prev", current == null ? "" : current).apply();
+                    Settings.Secure.putString(getContentResolver(), DREAMS, me.flattenToShortString());
+                    Settings.Secure.putInt(getContentResolver(), "screensaver_enabled", 1);
+                } else if (!on && ours) {
+                    String prev = prefs.getString("dream_prev", "");
+                    Settings.Secure.putString(getContentResolver(), DREAMS, prev.isEmpty() ? null : prev);
+                }
+                if (on) Bing.refresh(this, null);
+                toast(on ? "Bing images are now the screensaver" : "Your previous screensaver is back");
+                return;
+            } catch (SecurityException ignored) { }
+        }
+        if (!on || ours) return;
+        Bing.refresh(this, null);
+        try {
+            startActivity(new Intent(Settings.ACTION_DREAM_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            toast("Now choose “Metro: Bing images” as the screensaver");
+        } catch (Exception e) {
+            // Android TV keeps it in Settings › Device Preferences › Screen saver, with no direct way in.
+            startSafe(new Intent(Settings.ACTION_SETTINGS));
+            toast("In Device Preferences › Screen saver, choose “Metro: Bing images”");
+        }
+    }
+
+    // -------- Tiles tab
+
+    void tilesTab(LinearLayout b) {
+        caption(b, "Tile colour");
+        note(b, accent() == APP_COLOURS ? "Each tile uses its app's own colour. Pick an accent to theme every tile, with white logos."
+                : "All tiles use this accent with white logos. The first swatch goes back to app colours.");
         int[] cols = new int[PALETTE.length + 1];
         cols[0] = APP_COLOURS;
         System.arraycopy(PALETTE, 0, cols, 1, PALETTE.length);
@@ -1492,57 +2257,670 @@ public class StartActivity extends Activity implements Media.Listener {
             for (String k : prefs.getAll().keySet()) if (k.startsWith("color_")) e.remove(k);
             e.apply();
             buildTiles();
-            closeFlyout();
-            showSettings();
+            // The accent also colours the tab underline and switches.
+            styleTabs();
+            buildTab("sw" + c);
         });
-
-        caption(b, "Start screen");
-        item(b, null, "Animations: " + (animations() ? "On" : "Off"), "Windows 8 tile, live tile and app transitions", v -> {
-            prefs.edit().putBoolean("anim", !animations()).apply();
-            closeFlyout();
-            showSettings();
-        });
-        boolean sys = pinned(SYS_SYSTEM);
-        item(b, null, "System tile: " + (sys ? "On" : "Off"), "Live RAM and storage on Start", v -> {
-            pin(SYS_SYSTEM, !sys);
-            closeFlyout();
-            showSettings();
-        });
+        caption(b, "Live tiles");
+        row(b, "system", null, "System tile", "Live RAM and storage on Start", TRAIL_SWITCH, v -> {
+            boolean on = !pinned(SYS_SYSTEM);
+            pin(SYS_SYSTEM, on);
+            ((Row) v).on(on, true);
+        }).on(pinned(SYS_SYSTEM), false);
         if (!media.start()) {
-            item(b, null, "Turn on live media", "Allow notification access so tiles can show what's playing", v -> {
+            row(b, "media", null, "Turn on live media", "Allow notification access so tiles can show what's playing", TRAIL_NONE, v -> {
                 closeFlyout();
                 startSafe(new Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS"));
             });
         }
-        item(b, null, "Reset Start", "Default tiles, sizes and colours", v -> {
-            SharedPreferences.Editor e = prefs.edit().remove("pins");
+    }
+
+    // -------- Start tab
+
+    void startTab(LinearLayout b) {
+        caption(b, "Internet");
+        row(b, "net", null, "Internet access", "For Bing images, weather and update checks. While it's off, Metro never connects.",
+                TRAIL_SWITCH, v -> {
+            boolean on = !Net.allowed(this);
+            SharedPreferences.Editor e = prefs.edit().putBoolean("internet", on);
+            // The greeting comes on with the internet the first time, as a hello.
+            if (on && !prefs.contains("greeting")) e.putBoolean("greeting", true);
+            e.apply();
+            ((Row) v).on(on, true);
+            if (on) onlineRefresh();
+            updateGreeting();
+        }).on(Net.allowed(this), false);
+
+        caption(b, "Start screen");
+        row(b, "anim", null, "Animations", "Windows 8 tile, live tile and app transitions", TRAIL_SWITCH, v -> {
+            boolean on = !animations();
+            prefs.edit().putBoolean("anim", on).apply();
+            ((Row) v).on(on, true);
+        }).on(animations(), false);
+        row(b, "reset", null, "Reset Start", "Default tiles, sizes and colours", TRAIL_NAV, v -> {
+            SharedPreferences.Editor e = prefs.edit().remove("pins").remove("pos");
             for (String k : prefs.getAll().keySet()) if (k.startsWith("color_") || k.startsWith("size_")) e.remove(k);
             e.apply();
             focusKey = null;
             buildTiles();
             closeFlyout();
         });
+
+        caption(b, "Backup");
+        row(b, "backup", null, "Back up layout", "Saves tiles and settings as a picture in Pictures/Metro", TRAIL_NAV, v -> backupLayout());
+        long last = prefs.getLong("backup_at", 0);
+        row(b, "restore", null, "Restore layout", last == 0 ? "From a backup in Pictures, Download or on a USB drive"
+                : "Last backup: " + DateFormat.format("d MMM, h:mm a", last), TRAIL_NAV, v -> restoreLayout());
+    }
+
+    /** Right after Internet access comes on: start whatever online features are switched on. */
+    void onlineRefresh() {
+        if (prefs.getInt("bg", BG_BLACK) == BG_BING) Bing.refresh(this, () -> { bingShown = null; applyBackground(); });
+        Weather.refresh(this, this::updateGreeting);
+    }
+
+    // -------- text entry
+
+    interface TextSave { void save(String s); }
+
+    /**
+     * A small page with one text field (the TV's keyboard opens on it). Back, Cancel and Save return to
+     * Personalize, or to {@code back} when it's given.
+     */
+    void editText(String heading, String hint, String value, String tag, TextSave save, Runnable back) {
+        LinearLayout b = openFlyout(heading);
+        if (back != null) flyoutBack = back; else backToSettings(tag);
+        final Runnable ret = flyoutBack;
+        android.widget.EditText e = new android.widget.EditText(this);
+        e.setText(value);
+        e.setHint(hint);
+        e.setSingleLine(true);
+        e.setTextColor(Color.WHITE);
+        e.setHintTextColor(0xFF8A8A8A);
+        e.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+        e.setTypeface(Fonts.REG);
+        e.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_DONE);
+        e.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_CAP_WORDS);
+        android.graphics.drawable.StateListDrawable field = new android.graphics.drawable.StateListDrawable();
+        android.graphics.drawable.GradientDrawable fo = new android.graphics.drawable.GradientDrawable(), idle = new android.graphics.drawable.GradientDrawable();
+        fo.setColor(0xFF15181B);
+        fo.setStroke(dp(2), accentColor());
+        fo.setCornerRadius(dp(2));
+        idle.setColor(0xFF15181B);
+        idle.setStroke(dp(1), 0xFF5E646B);
+        idle.setCornerRadius(dp(2));
+        field.addState(new int[]{android.R.attr.state_focused}, fo);
+        field.addState(new int[]{}, idle);
+        e.setBackground(field);
+        e.setPadding(dp(14), dp(12), dp(14), dp(12));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.setMargins(0, dp(6), 0, dp(14));
+        b.addView(e, lp);
+        Runnable done = () -> {
+            save.save(e.getText().toString().trim());
+            ret.run();
+        };
+        e.setOnEditorActionListener((v, id, ev) -> { done.run(); return true; });
+        row(b, "save", null, "Save", null, TRAIL_NONE, v -> done.run());
+        row(b, "cancel", null, "Cancel", null, TRAIL_NONE, v -> flyoutBack.run());
+        h.post(() -> {
+            e.requestFocus();
+            e.setSelection(e.length());
+            android.view.inputmethod.InputMethodManager im = (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            if (im != null) im.showSoftInput(e, 0);
+        });
+    }
+
+    // -------- About tab
+
+    Updater.Release update;
+    String updateStatus, installStatus;
+    boolean updateHidden, updateBusy;
+    float installProgress = -1;
+    TextView installText;
+    View installBar;
+
+    void aboutTab(LinearLayout b) {
+        LinearLayout head = new LinearLayout(this);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.setPadding(0, dp(6), 0, dp(8));
+        ImageView icon = new ImageView(this);
+        icon.setImageDrawable(getApplicationInfo().loadIcon(getPackageManager()));
+        head.addView(icon, new LinearLayout.LayoutParams(dp(56), dp(56)));
+        LinearLayout names = new LinearLayout(this);
+        names.setOrientation(LinearLayout.VERTICAL);
+        names.setPadding(dp(16), 0, 0, 0);
+        names.addView(text("Metro", 20, Fonts.REG));
+        TextView ver = text("Version " + Updater.installedVersion(this), 13.5f, Fonts.REG);
+        ver.setTextColor(0xFFB4BAC0);
+        ver.setPadding(0, dp(5), 0, 0);
+        names.addView(ver);
+        head.addView(names);
+        b.addView(head);
+
+        if (update != null && !updateHidden) updateCard(b);
+
+        LinearLayout gap = new LinearLayout(this);
+        b.addView(gap, new LinearLayout.LayoutParams(-1, dp(10)));
+        row(b, "check", null, "Check for updates", checkedText(), TRAIL_NAV, v -> checkUpdates((Row) v));
+        row(b, "auto", null, "Check automatically", "Once a week · " + needsInternet().toLowerCase(), TRAIL_SWITCH, v -> {
+            boolean on = !prefs.getBoolean("update_auto", false);
+            prefs.edit().putBoolean("update_auto", on).apply();
+            ((Row) v).on(on, true);
+        }).on(prefs.getBoolean("update_auto", false), false);
+        note(b, "github.com/loneelephant32-lang/metro-tv-launcher").setPadding(dp(2), dp(14), 0, 0);
+    }
+
+    String checkedText() {
+        if (updateStatus != null) return updateStatus;
+        if (!Net.allowed(this)) return needsInternet();
+        long at = prefs.getLong("update_checked", 0);
+        if (at == 0) return ONLINE;
+        long mins = (System.currentTimeMillis() - at) / 60000;
+        return "Last checked " + (mins < 1 ? "just now" : mins < 60 ? mins + " min ago" : mins < 1440 ? (mins / 60) + " h ago"
+                : DateFormat.format("d MMM", at));
+    }
+
+    /** The available update: what's new, a progress bar while it downloads, and Install / Later. */
+    void updateCard(LinearLayout b) {
+        LinearLayout c = new LinearLayout(this);
+        c.setOrientation(LinearLayout.VERTICAL);
+        c.setPadding(dp(20), dp(18), dp(20), dp(18));
+        android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+        bg.setColor(blend(accentColor(), PANEL, 0.82f));
+        bg.setStroke(dp(1), blend(accentColor(), PANEL, 0.35f));
+        bg.setCornerRadius(dp(2));
+        c.setBackground(bg);
+        c.addView(text("Metro " + update.version + " is available", 18, Fonts.MED));
+        if (!update.notes.isEmpty()) {
+            TextView n = text(plainNotes(update.notes), 12.5f, Fonts.REG);
+            n.setTextColor(0xFFD2D6DA);
+            n.setMaxLines(4);
+            n.setEllipsize(TextUtils.TruncateAt.END);
+            n.setLineSpacing(dp(2.5f), 1);
+            n.setPadding(0, dp(10), 0, 0);
+            c.addView(n);
+        }
+        // Progress: a white bar over a grey track.
+        FrameLayout track = new FrameLayout(this);
+        track.setBackgroundColor(0xFF4A5057);
+        installBar = new View(this);
+        installBar.setBackgroundColor(Color.WHITE);
+        track.addView(installBar, new FrameLayout.LayoutParams(0, -1));
+        LinearLayout.LayoutParams tl = new LinearLayout.LayoutParams(-1, dp(3));
+        tl.topMargin = dp(16);
+        c.addView(track, tl);
+        installText = text("", 12.5f, Fonts.REG);
+        installText.setTextColor(0xFFD2D6DA);
+        installText.setPadding(0, dp(8), 0, 0);
+        c.addView(installText);
+        showInstall(installStatus != null ? installStatus : "Downloads " + Math.max(1, update.size / 1024) + " KB · Android asks you to confirm",
+                installProgress);
+        LinearLayout buttons = new LinearLayout(this);
+        buttons.setPadding(0, dp(14), 0, 0);
+        TextView install = button("Install", true), later = button("Later", false);
+        install.setTag("install");
+        later.setTag("later");
+        install.setOnClickListener(v -> installUpdate());
+        later.setOnClickListener(v -> { updateHidden = true; buildTab("check"); });
+        buttons.addView(install);
+        LinearLayout.LayoutParams ll = new LinearLayout.LayoutParams(-2, -2);
+        ll.leftMargin = dp(10);
+        buttons.addView(later, ll);
+        c.addView(buttons);
+        b.addView(c, new LinearLayout.LayoutParams(-1, -2));
+    }
+
+    /** Card buttons: Install is filled white, Later outlined; focus adds a ring in the accent. */
+    TextView button(String label, boolean primary) {
+        TextView t = text(label, 15, Fonts.MED);
+        t.setPadding(dp(22), dp(10), dp(22), dp(11));
+        t.setFocusable(true);
+        t.setClickable(true);
+        android.graphics.drawable.StateListDrawable s = new android.graphics.drawable.StateListDrawable();
+        android.graphics.drawable.GradientDrawable on = new android.graphics.drawable.GradientDrawable(), off = new android.graphics.drawable.GradientDrawable();
+        on.setColor(Color.WHITE);
+        on.setStroke(dp(3), blend(accentColor(), Color.WHITE, 0.4f));
+        off.setColor(primary ? 0xFFE6E8EA : 0);
+        if (!primary) off.setStroke(dp(1.5f), 0xFFBFC4C9);
+        s.addState(new int[]{android.R.attr.state_focused}, on);
+        s.addState(new int[]{}, off);
+        t.setBackground(s);
+        t.setTextColor(new android.content.res.ColorStateList(new int[][]{{android.R.attr.state_focused}, {}},
+                new int[]{0xFF1D1D1D, primary ? 0xFF1D1D1D : Color.WHITE}));
+        return t;
+    }
+
+    /** Mixes {@code a} into {@code b}: t = 0 is all a, 1 is all b. */
+    static int blend(int a, int b, float t) {
+        return Color.rgb(Math.round(Color.red(a) + (Color.red(b) - Color.red(a)) * t), Math.round(Color.green(a) + (Color.green(b) - Color.green(a)) * t),
+                Math.round(Color.blue(a) + (Color.blue(b) - Color.blue(a)) * t));
+    }
+
+    /** GitHub release notes are Markdown; the card shows them as plain text, without the install section. */
+    static String plainNotes(String md) {
+        StringBuilder out = new StringBuilder();
+        for (String line : md.split("\r?\n")) {
+            String l = line.replaceAll("\\*\\*|__|`", "").replaceAll("\\[([^\\]]*)\\]\\([^)]*\\)", "$1").trim();
+            if (l.startsWith("```")) continue;
+            if (l.startsWith("#") && l.toLowerCase().contains("install") && out.length() > 0) break;
+            // A "What's new" heading says nothing the card's title doesn't.
+            if (l.startsWith("#")) continue;
+            if (l.startsWith("- ") || l.startsWith("* ")) l = "•  " + l.substring(2);
+            if (l.isEmpty()) continue;
+            out.append(l).append('\n');
+        }
+        return out.toString().trim();
+    }
+
+    void checkUpdates(Row r) {
+        if (!Net.allowed(this)) { toast("Turn on Internet access in Personalize › Start first"); return; }
+        if (updateBusy) return;
+        updateBusy = true;
+        r.sub(updateStatus = "Checking…");
+        Updater.check(this, (newer, err) -> {
+            updateBusy = false;
+            update = newer;
+            updateHidden = false;
+            installStatus = null;
+            installProgress = -1;
+            updateStatus = err != null ? err : newer == null ? "Metro is up to date" : null;
+            if (flyoutOpen && settingsTab == TAB_ABOUT) buildTab(newer != null ? "install" : "check");
+        });
+    }
+
+    /** Downloads, checks it's a genuine Metro update, then hands it to Android's installer. */
+    void installUpdate() {
+        if (updateBusy || update == null) return;
+        if (Build.VERSION.SDK_INT >= 26 && !getPackageManager().canRequestPackageInstalls()) {
+            toast("Allow Metro to install updates, then select Install again");
+            try {
+                startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName()))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            } catch (Exception e) {
+                toast("Allow it in Settings › Apps › Special app access › Install unknown apps › Metro");
+            }
+            return;
+        }
+        updateBusy = true;
+        showInstall("Downloading…", 0);
+        Updater.download(this, update, (done, total) -> showInstall(total > 0
+                ? "Downloading · " + done / 1024 + " of " + total / 1024 + " KB" : "Downloading · " + done / 1024 + " KB",
+                total > 0 ? done / (float) total : 0), err -> {
+            if (err != null) { updateBusy = false; showInstall(err, -1); return; }
+            showInstall("Opening the installer…", 1);
+            Updater.install(this, err2 -> {
+                updateBusy = false;
+                showInstall(err2 != null ? err2 : "Confirm the update on screen", err2 != null ? -1 : 1);
+            });
+        });
+    }
+
+    void showInstall(String s, float progress) {
+        installStatus = s;
+        installProgress = progress;
+        if (installText == null) return;
+        installText.setText(s);
+        View track = (View) installBar.getParent();
+        // The bar only shows once something is happening.
+        track.setVisibility(progress < 0 ? View.GONE : View.VISIBLE);
+        if (progress >= 0) track.post(() -> {
+            ViewGroup.LayoutParams lp = installBar.getLayoutParams();
+            lp.width = Math.round(track.getWidth() * Math.min(1, progress));
+            installBar.setLayoutParams(lp);
+        });
+    }
+
+    // -------- layout backup
+
+    static final int REQ_BACKUP = 8, REQ_RESTORE = 9;
+
+    void backupLayout() {
+        if (Build.VERSION.SDK_INT < 29 && Build.VERSION.SDK_INT >= 23
+                && checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQ_BACKUP);
+            return;
+        }
+        try {
+            String where = LayoutBackup.save(this, layoutPicture(), LayoutBackup.export(prefs));
+            prefs.edit().putLong("backup_at", System.currentTimeMillis()).apply();
+            refreshTab(TAB_START);
+            toast("Saved to " + where);
+        } catch (Exception e) {
+            toast("Couldn't save the backup");
+        }
+    }
+
+    /** What the backup looks like in a gallery: Start's tiles in their colours, with their logos. */
+    Bitmap layoutPicture() {
+        int W = 1280, H = 720, cell = 92, gap = 8, top = 190, left = 70;
+        Bitmap bm = Bitmap.createBitmap(W, H, Bitmap.Config.ARGB_8888);
+        Canvas c = new Canvas(bm);
+        int mode = prefs.getInt("bg", BG_BLACK);
+        if (isGradient(mode)) { android.graphics.drawable.GradientDrawable g = gradient(mode); g.setBounds(0, 0, W, H); g.draw(c); }
+        else c.drawColor(mode == BG_WHITE ? 0xFFF2F2F2 : 0xFF0B0B0B);
+        Paint t = new Paint(Paint.ANTI_ALIAS_FLAG);
+        t.setTypeface(Fonts.REG);
+        t.setColor(mode == BG_WHITE ? 0xFF1D1D1D : Color.WHITE);
+        t.setTextSize(56);
+        c.drawText("Start", left, 110, t);
+        t.setTextSize(22);
+        t.setColor(mode == BG_WHITE ? 0xFF555555 : 0xFFBBBBBB);
+        c.drawText("Metro layout backup · " + DateFormat.getLongDateFormat(this).format(new Date())
+                + " · restore it from Personalize › Start", left, 150, t);
+        int n = tiles.size();
+        int[] w = new int[n], hh = new int[n];
+        int[][] at = new int[n][];
+        for (int i = 0; i < n; i++) {
+            TileGrid.LP lp = (TileGrid.LP) tiles.get(i).getLayoutParams();
+            w[i] = lp.w;
+            hh[i] = lp.h;
+            at[i] = new int[]{lp.col, lp.row};
+        }
+        Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG), logo = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG);
+        RectF r = new RectF();
+        for (int i = 0; i < n; i++) {
+            TileView tv = tiles.get(i);
+            float x = left + at[i][0] * (cell + gap), y = top + at[i][1] * (cell + gap);
+            if (x > W) break;
+            r.set(x, y, x + w[i] * cell + (w[i] - 1) * gap, y + hh[i] * cell + (hh[i] - 1) * gap);
+            fill.setColor(tv.color);
+            c.drawRect(r, fill);
+            Bitmap g = tv.whiteGlyph && tv.mono != null ? tv.mono : tv.glyph;
+            if (g == null && tv.sysGlyph != Glyphs.NONE) {
+                Paint gl = new Paint(Paint.ANTI_ALIAS_FLAG);
+                gl.setColor(Color.WHITE);
+                float s = cell * .42f;
+                Glyphs.draw(c, tv.sysGlyph, r.left + 10 + s / 2, r.top + 10 + s / 2, s * .86f, gl, 3, 0);
+            } else if (g != null) {
+                logo.setColorFilter(tv.whiteGlyph ? new android.graphics.PorterDuffColorFilter(Color.WHITE, android.graphics.PorterDuff.Mode.SRC_IN) : null);
+                float s = cell * .42f;
+                c.drawBitmap(g, null, new RectF(r.left + 10, r.top + 10, r.left + 10 + s, r.top + 10 + s), logo);
+            }
+        }
+        return bm;
+    }
+
+    void restoreLayout() {
+        String perm = Build.VERSION.SDK_INT >= 33 ? Manifest.permission.READ_MEDIA_IMAGES : Manifest.permission.READ_EXTERNAL_STORAGE;
+        if (Build.VERSION.SDK_INT >= 23 && checkSelfPermission(perm) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{perm}, REQ_RESTORE);
+            return;
+        }
+        List<File> found = new ArrayList<>(), backups = new ArrayList<>();
+        for (File r : imageRoots()) scanImages(r, 3, found);
+        List<String> data = new ArrayList<>();
+        for (File f : found) {
+            if (!f.getName().toLowerCase().endsWith(".png")) continue;
+            String json = LayoutBackup.read(f);
+            if (json != null) { backups.add(f); data.add(json); }
+        }
+        LinearLayout b = openFlyout("Restore layout");
+        backToSettings("restore");
+        if (backups.isEmpty()) {
+            note(b, "No layout backups found.\n\nBack up from Personalize › Start, or copy a \"Metro layout\" picture to Pictures, Download or a USB drive.");
+            row(b, null, null, "Back", null, TRAIL_NONE, v -> flyoutBack.run());
+        }
+        for (int i = 0; i < backups.size(); i++) {
+            File f = backups.get(i);
+            String json = data.get(i);
+            row(b, null, null, f.getName().replaceFirst("\\.png$", ""), LayoutBackup.summary(json) + " · " + f.getParentFile().getName(),
+                    TRAIL_NONE, v -> {
+                try {
+                    LayoutBackup.restore(prefs, json);
+                    focusKey = null;
+                    applyBackground();
+                    buildTiles();
+                    closeFlyout();
+                    toast("Layout restored");
+                } catch (Exception e) {
+                    toast("That backup couldn't be read");
+                }
+            });
+        }
         focusFirst();
     }
 
-    void setBg(int mode) {
-        prefs.edit().putInt("bg", mode).apply();
-        applyBackground();
-        closeFlyout();
-        showSettings();
+    List<File> imageRoots() {
+        List<File> roots = new ArrayList<>();
+        File ext = Environment.getExternalStorageDirectory();
+        for (String dir : new String[]{"Pictures", "Download", "DCIM", "Wallpapers", ""}) roots.add(new File(ext, dir));
+        File[] vols = new File("/storage").listFiles();
+        if (vols != null) for (File v : vols) if (!v.getName().equals("emulated") && !v.getName().equals("self")) roots.add(v);
+        return roots;
     }
+
+    // ---------------------------------------------------------------- inputs (HDMI, AV, Live TV)
+
+    List<android.media.tv.TvInputInfo> passthroughInputs() {
+        List<android.media.tv.TvInputInfo> out = new ArrayList<>();
+        try {
+            android.media.tv.TvInputManager tim = (android.media.tv.TvInputManager) getSystemService(TV_INPUT_SERVICE);
+            if (tim != null) for (android.media.tv.TvInputInfo info : tim.getTvInputList()) {
+                if (info.isPassthroughInput() && !info.isHidden(this) && info.getParentId() == null) out.add(info);
+            }
+        } catch (RuntimeException ignored) { }
+        return out;
+    }
+
+    String liveTv;
+
+    /**
+     * The TV's Live TV app (com.tcl.tv on TCL): the built-in app among those that play channel URIs. Other
+     * apps can claim them too (a file manager here), and then Android would show a chooser instead.
+     */
+    String liveTvPackage() {
+        if (liveTv != null) return liveTv.isEmpty() ? null : liveTv;
+        Intent view = new Intent(Intent.ACTION_VIEW).setDataAndType(android.media.tv.TvContract.buildChannelUriForPassthroughInput("x"),
+                "vnd.android.cursor.item/channel");
+        String best = "";
+        for (ResolveInfo ri : getPackageManager().queryIntentActivities(view, 0)) {
+            if (ri.activityInfo == null) continue;
+            boolean system = (ri.activityInfo.applicationInfo.flags & android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0;
+            if (system) { best = ri.activityInfo.packageName; break; }
+        }
+        liveTv = best;
+        return best.isEmpty() ? null : best;
+    }
+
+    /**
+     * Switch input: a drop-down under the Inputs button. Each input shows its name (or what you've
+     * called the device on it) and a green dot when something's connected. Menu renames or pins one.
+     */
+    void showInputs() {
+        LinearLayout b = openDropdown(inputsButton, "Switch input");
+        android.media.tv.TvInputManager tim = (android.media.tv.TvInputManager) getSystemService(TV_INPUT_SERVICE);
+        for (android.media.tv.TvInputInfo info : passthroughInputs()) {
+            String id = info.getId(), named = prefs.getString("input_name_" + id, "");
+            int state = Build.VERSION.SDK_INT >= 24 && tim != null ? tim.getInputState(id) : android.media.tv.TvInputManager.INPUT_STATE_CONNECTED;
+            boolean connected = state != android.media.tv.TvInputManager.INPUT_STATE_DISCONNECTED;
+            String sub = !named.isEmpty() ? named : state == android.media.tv.TvInputManager.INPUT_STATE_CONNECTED ? "Connected"
+                    : connected ? "Standby" : "Nothing connected";
+            dropRow(b, INPUT_PREFIX + id, isAv(info) ? Glyphs.AV : Glyphs.HDMI, inputLabel(id), sub,
+                    state == android.media.tv.TvInputManager.INPUT_STATE_CONNECTED ? 0xFF3FD06A : connected ? 0xFF2E7D45 : 0,
+                    v -> { closeFlyout(); openInput(id); });
+        }
+        String tv = liveTvPackage();
+        if (tv != null) {
+            dropRow(b, null, Glyphs.TV, "Live TV", "Antenna, cable and channels", 0, v -> {
+                closeFlyout();
+                Intent i = getPackageManager().getLeanbackLaunchIntentForPackage(tv);
+                if (i == null) i = getPackageManager().getLaunchIntentForPackage(tv);
+                if (i != null) startSafe(i);
+            });
+        }
+        if (b.getChildCount() == 1) note(b, "This TV has no inputs to switch to.");
+        View line = new View(this);
+        line.setBackgroundColor(0xFF33383E);
+        LinearLayout.LayoutParams ll = new LinearLayout.LayoutParams(-1, 1);
+        ll.topMargin = dp(6);
+        b.addView(line, ll);
+        TextView hint = text("Menu: rename an input or pin it to Start", 12.5f, Fonts.REG);
+        hint.setTextColor(0xFFD2D6DA);
+        hint.setPadding(dp(18), dp(12), dp(18), dp(14));
+        b.addView(hint);
+        focusFirst();
+    }
+
+    static boolean isAv(android.media.tv.TvInputInfo info) {
+        int t = info.getType();
+        return t == android.media.tv.TvInputInfo.TYPE_COMPOSITE || t == android.media.tv.TvInputInfo.TYPE_SVIDEO
+                || t == android.media.tv.TvInputInfo.TYPE_COMPONENT || t == android.media.tv.TvInputInfo.TYPE_SCART
+                || t == android.media.tv.TvInputInfo.TYPE_VGA;
+    }
+
+    /** The input's own name ("HDMI 1"), or the TV's custom label for it. */
+    String inputLabel(String id) {
+        try {
+            android.media.tv.TvInputManager tim = (android.media.tv.TvInputManager) getSystemService(TV_INPUT_SERVICE);
+            android.media.tv.TvInputInfo info = tim == null ? null : tim.getTvInputInfo(id);
+            if (info != null) {
+                CharSequence custom = info.loadCustomLabel(this);
+                return String.valueOf(custom != null && custom.length() > 0 ? custom : info.loadLabel(this));
+            }
+        } catch (RuntimeException ignored) { }
+        return "Input";
+    }
+
+    /** What a pinned input tile is called: the device name you gave it, else the input's name. */
+    String inputName(String id) {
+        String named = prefs.getString("input_name_" + id, "");
+        return named.isEmpty() ? inputLabel(id) : named;
+    }
+
+    void inputMenu(String id) {
+        String key = INPUT_PREFIX + id;
+        LinearLayout b = openFlyout(inputLabel(id));
+        flyoutBack = () -> { closeFlyout(); showInputs(); };
+        String named = prefs.getString("input_name_" + id, "");
+        row(b, "rename", null, "Name the device on it", named.isEmpty() ? "For example: Game console" : named, TRAIL_NAV,
+                v -> editText("Device on " + inputLabel(id), "For example: Game console, Set-top box", named, "rename", val -> {
+            prefs.edit().putString("input_name_" + id, val).apply();
+            if (pinned(key)) buildTiles();
+        }, () -> { closeFlyout(); showInputs(); }));
+        boolean on = pinned(key);
+        row(b, "pin", null, on ? "Unpin from Start" : "Pin to Start", on ? null : "As a tile that switches straight to this input", TRAIL_NONE, v -> {
+            pin(key, !on);
+            closeFlyout();
+            toast(on ? "Unpinned " + inputName(id) : "Pinned " + inputName(id) + " to Start");
+        });
+        focusFirst();
+    }
+
+    /**
+     * A small panel hanging under {@code anchor}, for short lists like Switch input. Back or a pick closes it.
+     */
+    LinearLayout openDropdown(View anchor, String heading) {
+        flyoutLayer.animate().cancel();
+        flyoutLayer.removeAllViews();
+        flyoutLayer.setBackgroundColor(0x40000000);
+        flyoutBack = null;
+        dropdown = true;
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        android.graphics.drawable.GradientDrawable bg = new android.graphics.drawable.GradientDrawable();
+        bg.setColor(PANEL);
+        bg.setStroke(dp(1), 0xFF3A3F45);
+        bg.setCornerRadius(dp(2));
+        body.setBackground(bg);
+        body.setElevation(dp(12));
+        body.setOnClickListener(v -> { });
+        TextView t = text(heading.toUpperCase(), 11.5f, Fonts.MED);
+        t.setTextColor(0xFFC8CDD2);
+        t.setLetterSpacing(0.12f);
+        t.setPadding(dp(18), dp(16), dp(18), dp(10));
+        body.addView(t);
+        int w = dp(330);
+        int[] a = new int[2], r = new int[2];
+        anchor.getLocationInWindow(a);
+        root.getLocationInWindow(r);
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(w, -2, Gravity.TOP | Gravity.START);
+        lp.leftMargin = Math.max(dp(16), Math.min(root.getWidth() - w - dp(16), a[0] - r[0] + anchor.getWidth() / 2 - w / 2));
+        lp.topMargin = a[1] - r[1] + anchor.getHeight() + dp(10);
+        flyoutLayer.addView(body, lp);
+        content.setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
+        flyoutLayer.setVisibility(View.VISIBLE);
+        flyoutOpen = true;
+        flyoutLayer.setAlpha(0);
+        flyoutLayer.animate().alpha(1).setDuration(120).start();
+        body.setTranslationY(-dp(8));
+        body.animate().translationY(0).setDuration(180).setInterpolator(new DecelerateInterpolator(2f)).start();
+        flyoutBody = body;
+        return body;
+    }
+
+    /** A drop-down row: glyph, name and status, an optional status dot; focus fills it with the accent. */
+    View dropRow(LinearLayout parent, String tag, int glyph, String label, String sub, int dot, View.OnClickListener click) {
+        LinearLayout row = new LinearLayout(this) {
+            final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+            @Override protected void dispatchDraw(Canvas c) {
+                p.setStyle(Paint.Style.FILL);
+                if (isPressed() || isFocused()) {
+                    p.setColor(isPressed() ? blend(accentColor(), Color.BLACK, 0.25f) : accentColor());
+                    c.drawRect(0, 0, getWidth(), getHeight(), p);
+                }
+                p.setColor(Color.WHITE);
+                Glyphs.draw(c, glyph, dp(30), getHeight() / 2f, dp(20), p, dp(1.8f), 3);
+                if (dot != 0) {
+                    p.setStyle(Paint.Style.FILL);
+                    p.setColor(dot);
+                    c.drawCircle(getWidth() - dp(24), getHeight() / 2f, dp(5), p);
+                }
+                super.dispatchDraw(c);
+            }
+        };
+        row.setWillNotDraw(false);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setPadding(dp(60), dp(11), dp(44), dp(12));
+        row.setFocusable(true);
+        row.setClickable(true);
+        row.setTag(tag);
+        row.setOnFocusChangeListener((v, f) -> v.invalidate());
+        row.addView(text(label, 16, Fonts.REG));
+        TextView st = text(sub, 12.5f, Fonts.REG);
+        st.setTextColor(0xFFDCE0E4);
+        st.setPadding(0, dp(4), 0, 0);
+        row.addView(st);
+        row.setOnClickListener(click);
+        parent.addView(row, new LinearLayout.LayoutParams(-1, -2));
+        return row;
+    }
+
+    /** Opens an HDMI or AV input the standard way: its channel URI, aimed at the Live TV app first. */
+    void openInput(String id) {
+        Intent view = new Intent(Intent.ACTION_VIEW)
+                .setDataAndType(android.media.tv.TvContract.buildChannelUriForPassthroughInput(id), "vnd.android.cursor.item/channel")
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        String tv = liveTvPackage();
+        if (tv != null) {
+            try { startActivity(new Intent(view).setPackage(tv)); return; } catch (Exception ignored) { }
+        }
+        try { startActivity(view); } catch (Exception e) { toast("Couldn't switch to that input"); }
+    }
+
+    // ---------------------------------------------------------------- background
 
     void applyBackground() {
         int mode = prefs.getInt("bg", BG_BLACK);
         bgImage.setImageDrawable(null);
         File f = new File(getFilesDir(), "bg.jpg");
+        bingShown = null;
+        Bing.Image bing = mode == BG_BING ? Bing.current(this) : null;
+        Bitmap photo = null;
         if (mode == BG_IMAGE && f.exists()) {
             BitmapFactory.Options o = new BitmapFactory.Options();
             o.inPreferredConfig = Bitmap.Config.RGB_565;
-            bgImage.setImageBitmap(BitmapFactory.decodeFile(f.getPath(), o));
+            photo = BitmapFactory.decodeFile(f.getPath(), o);
+        } else if (bing != null) {
+            photo = Bing.load(this, bing);
+            if (photo != null) bingShown = bing.file;
+        }
+        if (photo != null) {
+            bgImage.setImageBitmap(photo);
             // Dim slightly, like the Windows 8 start backgrounds, so tiles and text stay readable.
             bgImage.setColorFilter(0x55000000, android.graphics.PorterDuff.Mode.SRC_ATOP);
         }
+        showBingCaption(bingShown != null ? bing : null);
         bgImage.setVisibility(bgImage.getDrawable() == null ? View.GONE : View.VISIBLE);
         getWindow().setBackgroundDrawable(isGradient(mode) ? gradient(mode) : new ColorDrawable(mode == BG_WHITE ? Color.WHITE : Color.BLACK));
         applyBackgroundColors();
@@ -1552,15 +2930,71 @@ public class StartActivity extends Activity implements Media.Listener {
         int mode = prefs.getInt("bg", BG_BLACK);
         boolean light = mode == BG_WHITE;
         int fg = light ? 0xFF1D1D1D : Color.WHITE;
-        float shadow = mode == BG_IMAGE ? dp(3) : 0;
-        for (TextView t : new TextView[]{startButton, clock, date, statusHint}) {
+        float shadow = isPhoto(mode) ? dp(3) : 0;
+        for (TextView t : new TextView[]{startButton, clock, date, statusHint, greeting}) {
             t.setTextColor(fg);
             t.setShadowLayer(shadow, 0, dp(1), 0xCC000000);
         }
         date.setTextColor(light ? 0xFF555555 : 0xFFC8C8C8);
+        greeting.setTextColor(light ? 0xFF3A3A3A : 0xE6FFFFFF);
         styleStart();
         for (TileView t : tiles) { t.ringColor = fg; t.invalidate(); }
         if (wifiButton != null) for (View v : new View[]{wifiButton}) v.invalidate();
+    }
+
+    /** The photo's title, then "photographer · Bing image of the day". */
+    void showBingCaption(Bing.Image im) {
+        int vis = im != null ? View.VISIBLE : View.GONE;
+        bingCaption.setVisibility(vis);
+        if (im == null) return;
+        bingTitle.setText(im.description.isEmpty() ? "Bing image of the day" : im.description);
+        bingCredit.setText(im.credit.isEmpty() ? "Bing image of the day" : im.credit + " · Bing image of the day");
+    }
+
+    /** Crossfades to the next Bing image when its turn comes (checked once a minute while Start is open). */
+    void bingTick() {
+        if (prefs.getInt("bg", BG_BLACK) != BG_BING) return;
+        Bing.Image im = Bing.current(this);
+        if (im == null || im.file.equals(bingShown)) return;
+        Bitmap bm = Bing.load(this, im);
+        if (bm == null) return;
+        bingShown = im.file;
+        android.graphics.drawable.Drawable old = bgImage.getDrawable();
+        android.graphics.drawable.BitmapDrawable next = new android.graphics.drawable.BitmapDrawable(getResources(), bm);
+        if (old == null || !animations()) {
+            bgImage.setImageDrawable(next);
+        } else {
+            if (old instanceof android.graphics.drawable.TransitionDrawable) old = ((android.graphics.drawable.TransitionDrawable) old).getDrawable(1);
+            android.graphics.drawable.TransitionDrawable fade = new android.graphics.drawable.TransitionDrawable(new android.graphics.drawable.Drawable[]{old, next});
+            fade.setCrossFadeEnabled(true);
+            bgImage.setImageDrawable(fade);
+            fade.startTransition(1200);
+            // Settle on the new image alone, so the old one can be freed.
+            h.postDelayed(() -> { if (bgImage.getDrawable() == fade) bgImage.setImageDrawable(next); }, 1400);
+        }
+        bgImage.setColorFilter(0x55000000, android.graphics.PorterDuff.Mode.SRC_ATOP);
+        bgImage.setVisibility(View.VISIBLE);
+        showBingCaption(im);
+    }
+
+    /** "Good evening, Anshuman" for the time of day (whether or not the greeting is switched on). */
+    String greetingText() {
+        int hr = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY);
+        String g = hr >= 5 && hr < 12 ? "Good morning" : hr >= 12 && hr < 17 ? "Good afternoon" : "Good evening";
+        String name = prefs.getString("name", "").trim();
+        return name.isEmpty() ? g : g + ", " + name;
+    }
+
+    /** "Good evening, Anshuman · 24° Partly cloudy" under Start, when the greeting is on. */
+    void updateGreeting() {
+        if (greeting == null) return;
+        StringBuilder g = new StringBuilder();
+        if (prefs.getBoolean("greeting", false)) g.append(greetingText());
+        String w = Weather.line(this);
+        if (w != null) g.append(g.length() > 0 ? "  ·  " : "").append(w);
+        setIfChanged(greeting, g.toString());
+        int vis = g.length() > 0 ? View.VISIBLE : View.GONE;
+        if (greeting.getVisibility() != vis) greeting.setVisibility(vis);
     }
 
     /**
@@ -1577,12 +3011,32 @@ public class StartActivity extends Activity implements Media.Listener {
             else startButton.setShadowLayer(dp(16), 0, 0, 0xF2FFFFFF);
         } else {
             startButton.setTextColor(fg & 0xBFFFFFFF);
-            startButton.setShadowLayer(mode == BG_IMAGE ? dp(3) : 0, 0, dp(1), 0xCC000000);
+            startButton.setShadowLayer(isPhoto(mode) ? dp(3) : 0, 0, dp(1), 0xCC000000);
         }
         startButton.setPivotX(0);
         startButton.setPivotY(startButton.getHeight() / 2f);
         float sc = on ? 1.08f : 1f;
         startButton.animate().scaleX(sc).scaleY(sc).setDuration(150).start();
+    }
+
+    void alignClock() {
+        if (clock == null || clock.getParent() == null || startButton.getBaseline() < 0) return;
+        int clockBase = topIn(clock) + clock.getBaseline(), startBase = topIn(startButton) + startButton.getBaseline();
+        float dy = startBase - clockBase;
+        clock.setTranslationY(dy);
+        if (greeting.getVisibility() == View.VISIBLE && greeting.getBaseline() >= 0) {
+            date.setTranslationY(topIn(greeting) + greeting.getBaseline() - (topIn(date) + date.getBaseline()));
+        } else {
+            date.setTranslationY(dy);
+        }
+    }
+
+    /** A view's top within the header, which holds the clock column, Start and the greeting. */
+    int topIn(View v) {
+        View header = content.getChildAt(0);
+        int y = 0;
+        for (View p = v; p != header && p != null; p = (View) p.getParent()) y += p.getTop();
+        return y;
     }
 
     /** Centres the status-bar label just under the focused icon (once the new text has been measured). */
@@ -1608,21 +3062,18 @@ public class StartActivity extends Activity implements Media.Listener {
             return;
         }
         List<File> found = new ArrayList<>();
-        List<File> roots = new ArrayList<>();
         File ext = Environment.getExternalStorageDirectory();
-        for (String dir : new String[]{"Pictures", "Download", "DCIM", "Wallpapers", ""}) roots.add(new File(ext, dir));
-        File[] vols = new File("/storage").listFiles();
-        if (vols != null) for (File v : vols) if (!v.getName().equals("emulated") && !v.getName().equals("self")) roots.add(v);
-        for (File r : roots) scanImages(r, 2, found);
+        for (File r : imageRoots()) scanImages(r, 2, found);
 
         LinearLayout b = openFlyout("Background image");
+        backToSettings("wp" + BG_IMAGE);
         if (found.isEmpty()) {
             TextView t = text("No images found.\n\nCopy a .jpg or .png to the Pictures or Download folder (or plug in a USB drive) and try again.", 13.5f, Fonts.REG);
             t.setTextColor(0xFFBBBBBB);
             t.setPadding(dp(10), 0, dp(10), 0);
             t.setLineSpacing(dp(4), 1);
             b.addView(t);
-            item(b, null, "Back", null, v -> { closeFlyout(); showSettings(); });
+            item(b, null, "Back", null, v -> flyoutBack.run());
         }
         for (File f : found) {
             String where = f.getParentFile().equals(ext) ? "Internal storage" : f.getParentFile().getName();
@@ -1648,41 +3099,17 @@ public class StartActivity extends Activity implements Media.Listener {
 
     /** Downsample to screen size and keep a private copy so the original can be deleted later. */
     boolean saveBackground(File src) {
-        try {
-            BitmapFactory.Options o = new BitmapFactory.Options();
-            o.inJustDecodeBounds = true;
-            BitmapFactory.decodeFile(src.getPath(), o);
-            int target = Math.max(root.getWidth(), root.getHeight());
-            int sample = 1;
-            while (Math.max(o.outWidth, o.outHeight) / (sample * 2) >= target) sample *= 2;
-            o = new BitmapFactory.Options();
-            o.inSampleSize = sample;
-            Bitmap raw = BitmapFactory.decodeFile(src.getPath(), o);
-            if (raw == null) return false;
-            // Centre-crop to exactly the screen so the stored copy (and what we keep in RAM) is screen-sized.
-            int sw = root.getWidth(), sh = root.getHeight();
-            float scale = Math.max(sw / (float) raw.getWidth(), sh / (float) raw.getHeight());
-            Bitmap bm = Bitmap.createBitmap(sw, sh, Bitmap.Config.RGB_565);
-            Canvas cv = new Canvas(bm);
-            cv.translate((sw - raw.getWidth() * scale) / 2, (sh - raw.getHeight() * scale) / 2);
-            cv.scale(scale, scale);
-            cv.drawBitmap(raw, 0, 0, new Paint(Paint.FILTER_BITMAP_FLAG));
-            raw.recycle();
-            try (FileOutputStream out = new FileOutputStream(new File(getFilesDir(), "bg.jpg"))) {
-                bm.compress(Bitmap.CompressFormat.JPEG, 88, out);
-            }
-            bm.recycle();
-            h.postDelayed(() -> Runtime.getRuntime().gc(), 500);
-            return true;
-        } catch (Exception e) {
-            return false;
-        }
+        boolean ok = Bing.fit(src, new File(getFilesDir(), "bg.jpg"), root.getWidth(), root.getHeight());
+        h.postDelayed(() -> Runtime.getRuntime().gc(), 500);
+        return ok;
     }
 
     @Override
     public void onRequestPermissionsResult(int req, String[] perms, int[] res) {
-        if (req == REQ_IMAGES && res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED) pickImage();
-        else if (req == REQ_IMAGES) toast("Storage permission is needed to pick an image");
+        boolean ok = res.length > 0 && res[0] == PackageManager.PERMISSION_GRANTED;
+        if (req == REQ_IMAGES) { if (ok) pickImage(); else toast("Storage permission is needed to pick an image"); }
+        else if (req == REQ_RESTORE) { if (ok) restoreLayout(); else toast("Storage permission is needed to find backups"); }
+        else if (req == REQ_BACKUP) { if (ok) backupLayout(); else toast("Storage permission is needed to save a backup"); }
     }
 
     // ---------------------------------------------------------------- recents flyout
@@ -1754,13 +3181,14 @@ public class StartActivity extends Activity implements Media.Listener {
         final int size = tileSize(k);
         for (int sz = 1; sz <= 3; sz++) {
             final int pick = sz;
-            item(b, null, SIZE_NAMES[sz] + (sz == size ? "  \u2713" : ""), null, v -> {
+            row(b, null, null, SIZE_NAMES[sz], null, TRAIL_CHECK, v -> {
                 closeFlyout();
                 if (pick == size) return;
                 prefs.edit().putInt("size_" + k, pick).apply();
                 focusKey = k;
+                layoutFirst = k;
                 buildTiles();
-            });
+            }).on(sz == size, false);
         }
         caption(b, a != null ? "Tile colour (first swatch: app colour)" : "Tile colour");
         int[] cols = new int[PALETTE.length + 1];
@@ -1796,6 +3224,9 @@ public class StartActivity extends Activity implements Media.Listener {
             root.addView(moveHint, lp);
         }
         moveHint.setText("Moving " + t.label + ": use the arrows, then press OK");
+        // Above the Bing caption when there is one, so the two don't overlap.
+        ((FrameLayout.LayoutParams) moveHint.getLayoutParams()).bottomMargin = bingCaption.getVisibility() == View.VISIBLE ? dp(64) : dp(18);
+        moveHint.requestLayout();
         moveHint.setAlpha(0);
         moveHint.setVisibility(View.VISIBLE);
         moveHint.animate().alpha(1).setDuration(200).start();
@@ -1813,56 +3244,40 @@ public class StartActivity extends Activity implements Media.Listener {
     }
 
     /**
-     * Moves the lifted tile one step in a direction. Tiles are packed in order, so every possible
-     * place in that order is tried and the one landing nearest the next spot in that direction wins.
+     * Moves the lifted tile one cell: sideways it trades places with its neighbour, so a wide tile passes
+     * one small tile per press; up or down it swaps rows. See {@link Layout#move}.
      */
     void moveBy(int dx, int dy) {
-        int i = tiles.indexOf(moving), n = tiles.size();
-        if (i < 0) return;
-        int[] w = new int[n], hh = new int[n];
-        for (int k = 0; k < n; k++) {
-            TileGrid.LP lp = (TileGrid.LP) tiles.get(k).getLayoutParams();
-            w[k] = lp.w;
-            hh[k] = lp.h;
-        }
-        int[] now = TileGrid.pack(w, hh, grid.rows)[i];
-        int best = -1;
-        long bestScore = Long.MAX_VALUE;
-        for (int j = 0; j < n; j++) {
-            if (j == i) continue;
-            // The order with the lifted tile taken out and put back in at j.
-            List<Integer> order = new ArrayList<>();
-            for (int k = 0; k < n; k++) if (k != i) order.add(k);
-            order.add(j, i);
-            int[] w2 = new int[n], h2 = new int[n];
-            for (int k = 0; k < n; k++) {
-                w2[k] = w[order.get(k)];
-                h2[k] = hh[order.get(k)];
-            }
-            int[] at = TileGrid.pack(w2, h2, grid.rows)[j];
-            int ddx = at[0] - now[0], ddy = at[1] - now[1];
-            boolean ok = dx < 0 ? ddx < 0 : dx > 0 ? ddx > 0 : dy < 0 ? ddy < 0 : ddy > 0;
-            if (!ok) continue;
-            // Nearest along the direction first, then the least sideways drift, then the fewest tiles shuffled.
-            long along = dx != 0 ? Math.abs(ddx) : Math.abs(ddy), across = dx != 0 ? Math.abs(ddy) : Math.abs(ddx);
-            long score = along * 10000 + across * 100 + Math.abs(j - i);
-            if (score < bestScore) { bestScore = score; best = j; }
-        }
-        if (best < 0) {
+        Layout l = layout();
+        Layout.Tile t = l.find(key(moving));
+        if (t == null || !l.move(t, dx, dy)) {
             // Nowhere to go that way: a small nudge says so.
+            TileView mv = moving;
             float o = dp(10) * (dx + dy);
-            moving.animate().translationX(dx != 0 ? o : 0).translationY(dy != 0 ? o : 0).setDuration(80)
-                    .withEndAction(() -> moving.animate().translationX(0).translationY(0).setDuration(120).start()).start();
+            mv.animate().translationX(dx != 0 ? o : 0).translationY(dy != 0 ? o : 0).setDuration(80)
+                    .withEndAction(() -> mv.animate().translationX(0).translationY(0).setDuration(120).start()).start();
             return;
         }
-        TileView t = moving;
-        tiles.remove(i);
-        tiles.add(best, t);
-        grid.moveChild(t, best);
-        List<String> order = new ArrayList<>();
-        for (TileView v : tiles) order.add(key(v));
-        savePins(order);
-        t.post(() -> t.requestRectangleOnScreen(new Rect(0, 0, t.getWidth(), t.getHeight())));
+        saveLayout(l);
+        applyLayout(l);
+        TileView mv = moving;
+        mv.post(() -> mv.requestRectangleOnScreen(new Rect(0, 0, mv.getWidth(), mv.getHeight())));
+    }
+
+    /** Gives each tile its new cell and lets the grid glide them there. */
+    void applyLayout(Layout l) {
+        for (TileView tv : tiles) {
+            Layout.Tile cell = l.find(key(tv));
+            if (cell == null) continue;
+            TileGrid.LP lp = (TileGrid.LP) tv.getLayoutParams();
+            lp.col = cell.c;
+            lp.row = cell.r;
+        }
+        Collections.sort(tiles, (a, b) -> {
+            TileGrid.LP x = (TileGrid.LP) a.getLayoutParams(), y = (TileGrid.LP) b.getLayoutParams();
+            return x.col != y.col ? x.col - y.col : x.row - y.row;
+        });
+        grid.animateNextLayout();
     }
 
     @Override

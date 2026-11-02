@@ -5,8 +5,8 @@ import android.view.View;
 import android.view.ViewGroup;
 
 /**
- * Windows 8 start-screen packing: tiles flow top to bottom through columns that are two medium tiles
- * wide (one wide tile, or a large 2x2).
+ * Lays tiles out on Start's cell grid. Where each tile goes is decided by {@link Layout} and handed in
+ * through its LP (col, row); this only turns cells into pixels and animates tiles that change place.
  */
 public class TileGrid extends ViewGroup {
     public static class LP extends ViewGroup.LayoutParams {
@@ -43,8 +43,8 @@ public class TileGrid extends ViewGroup {
     @Override protected ViewGroup.LayoutParams generateDefaultLayoutParams() { return new LP(1, 1); }
 
     /**
-     * Where tiles of the given sizes land, in order: {col, row} for each. Kept free of views so a move
-     * can try out every position before committing to one.
+     * The original Windows 8 packing, tiles flowing top to bottom through columns two cells wide. Only
+     * used to place tiles the first time (or after a reset), so an existing Start keeps its look.
      */
     static int[][] pack(int[] w, int[] h, int rows) {
         int n = w.length;
@@ -68,13 +68,9 @@ public class TileGrid extends ViewGroup {
         return at;
     }
 
-    /** Puts a child at another index without detaching its focus, then lets the next layout glide everything there. */
-    void moveChild(View v, int to) {
-        int from = indexOfChild(v);
-        if (from < 0 || from == to) return;
+    /** The next layout glides every tile that changes place from where it was, like Windows 8 tiles making room. */
+    void animateNextLayout() {
         snapshot();
-        detachViewFromParent(from);
-        attachViewToParent(v, to, v.getLayoutParams());
         requestLayout();
         invalidate();
     }
@@ -92,19 +88,9 @@ public class TileGrid extends ViewGroup {
 
     @Override
     protected void onMeasure(int wSpec, int hSpec) {
-        int n = getChildCount();
-        int[] w = new int[n], h = new int[n];
+        int n = getChildCount(), maxCol = 0;
         for (int i = 0; i < n; i++) {
             LP lp = (LP) getChildAt(i).getLayoutParams();
-            w[i] = lp.w;
-            h[i] = lp.h;
-        }
-        int[][] at = pack(w, h, rows);
-        int maxCol = 0;
-        for (int i = 0; i < n; i++) {
-            LP lp = (LP) getChildAt(i).getLayoutParams();
-            lp.col = at[i][0];
-            lp.row = at[i][1];
             maxCol = Math.max(maxCol, lp.col + lp.w);
         }
         colX = new int[maxCol + 1];
